@@ -42,3 +42,24 @@ Set `InpResetState = true` once to start fresh.
 - For XAUUSD raise `InpMaxSpreadPoints` (gold spreads are larger in points, e.g. 200–400).
 - If you see "Lot size too small for risk settings", the minimum 0.01 lot is too big for your
   balance/SL — use a Cent account or a lower-volatility symbol.
+
+---
+
+# AarYaParEA — all-or-nothing mode
+
+`MQL5/Experts/AarYaParEA.mq5` makes **a few very large trades**. It either reaches the target
+in a short winning streak (paar) or loses the deposit (aar).
+
+**How it works**
+- Same entry signal as NaitikGrowthEA (EMA 50/200 trend + RSI pullback), one trade at a time.
+- Each trade risks `InpRiskPercent` (default **90%**) of equity at the SL.
+- The TP is sized so that a win lands exactly on `InpTargetEquity`, capped at `InpMaxRR` (default 3.5).
+  With $100: trade 1 risks ~$90 for ~+$315 → ~$415, trade 2 risks ~$373 for ~+$585 → **$1000**.
+- At the target it closes everything and stops for good (`InpResetState = true` to rearm).
+- Lot size is capped to 50% of free margin so the broker's stop-out doesn't hit before the SL.
+
+**The real odds:** in a fair market, the chance of turning $100 into $1000 is **at best ~10%**, whatever
+the strategy (the expected value of a trade is roughly zero, and the spread and commission pull it slightly negative).
+With the default 2-trade plan it's roughly 1/4.5 × 1/2.6 ≈ **8–9%**. That means about **9 out of 10 runs lose the $100**.
+Raising `InpMaxRR` to 10 makes it a single trade with the same ~9% chance.
+Only use money you are fully prepared to lose.
