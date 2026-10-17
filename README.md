@@ -71,6 +71,9 @@ Only use money you are fully prepared to lose.
 `MQL5/Experts/HedgeDailyEA.mq5` keeps both a buy and a sell open and stops each day once it has made its target.
 **Needs an MT5 hedging account** (the Exness default).
 
+> ⚠️ In simulation (see **HedgeDailyEA 2.0** below) this v1 lost about **96%** of the account on 2017 EURUSD data,
+> even though it hit its daily target on 147 of 240 days. Use v2 instead.
+
 **How it works**
 - Opens 1 buy + 1 sell. Each trade has a small TP (`InpTakeProfitPoints`, default 150 points = 15 pips) and **no SL**.
 - When a trade hits its TP, a new one opens on the same side, so it stays hedged.
@@ -90,3 +93,67 @@ the losing side piles up and the floating loss grows faster and faster. One such
 That's why the equity stop exists; turning it off means one bad trend can blow the account.
 Backtest at least 1–2 years (including trending months) and demo-test before going live.
 Best on ranging pairs like EURCHF, AUDNZD, EURGBP; avoid XAUUSD and news times.
+
+---
+
+# HedgeDailyEA 2.0 — adaptive buy + sell hedge grid
+
+`MQL5/Experts/HedgeDailyEA_v2.mq5`. **Needs an MT5 hedging account** (the Exness default).
+Still a hedge EA: it holds buys and sells together, uses **no stop loss on trades**, and stops for the day at a profit target.
+
+## What changed vs v1 (each fix targets a v1 failure found in simulation)
+| v1 problem | v2 fix |
+|---|---|
+| Lot size from *balance*: while a hedge leg floats in loss, balance > equity, so lots got too big | Lot size from `min(balance, equity)`, set as money per 0.01 lot (`InpMoneyPer001Lot` = 300) |
+| Fixed 15-pip TP / 20-pip grid: the spread ate ~7% of every win, and the grid was too tight for volatile days | ATR-based spacing (`InpGridATR`/`InpTpATR` = 2 × ATR(H1), ~25–30 pips on EURUSD), each level 1.3× wider |
+| Grid on both sides: in a trend the losing side piled up until the 40% equity stop | **Trend-aligned mode**: adds only in the H4 trend direction (buys on dips in an uptrend, sells on rallies in a downtrend); the other side keeps one hedge trade |
+| Every trade had its own TP | **Basket TP**: all trades of a side close together at the average price ± 1 × ATR |
+| Daily target on day-start *equity*: a losing cycle got closed on a bounce and still counted as a target day | Daily target on day-start **balance** (`InpDailyTargetPct` = 1.5) |
+| Only a 40% equity stop | **Hedge lock** at 10% cycle drawdown (`InpUseLock`): opens the opposite side for the net exposure so the loss stops growing, with no stop loss on the trades. Then a **hard stop** at 30% as the last resort (`InpHardStopPct`, 0 = off) |
+| No market filters | New cycles only in a range (ADX < 25, price inside the Bollinger bands); add a level only after a candle closes in its favour; no adds against a strong ADX trend; **news filter** (live only, high-impact events); spread, margin level, trading hours, Friday close |
+
+## Simulation results
+Python simulator in `research/hedge_sim/` (reproduce with `python run_tests.py`). EURUSD H1, Apr 2017 – Feb 2018,
+1-pip spread, $10,000 start (the % results scale the same for a $100 cent account).
+
+| Test | v1 | v2 |
+|---|---|---|
+| Real data (uptrend 1.07 → 1.23) | **−96.4%** | **+67.2%** (max drawdown 33.5%) |
+| Same data mirrored into a downtrend, with swap costs | −97.0% | +38.0% (max drawdown 40.0%) |
+| 6 random-walk tests (real volatility, no trend) | −59.9% … −98.5% (all 6 lost) | −61.0% … +17.8% (4 of 6 lost, median ≈ −25%) |
+| Days the 1.5% daily target was hit (real data) | 147 of 240 | 0 |
+
+v2 month by month on the real data: +13.4%, +19.8%, +20.2%, +1.6%, +4.2%, −4.6%, +19.9%, −1.5%, −15.5%, +1.7%.
+
+**How to read this honestly**
+- v1's 147 "target days" still ended at −96%: five days with ~40% losses wiped them all out. A high win rate is not profit.
+- v2 makes money when the market **trends** (it buys dips with the trend) and usually **loses when there is no trend**.
+  It is not a guaranteed daily income.
+- At the lot size where the account survived the tests, **+1.5% in one day almost never happened**. A daily 1–2%
+  target is only reachable with v1-style lot sizes, and those are what blew up v1.
+- This is a 10-month, single-pair simulation on hourly bars (no real tick data, no news, no slippage).
+  Treat it as a sanity check, not a promise. Run the MT5 Strategy Tester on several years and a demo account before going live.
+
+## Key settings
+| Input | Default | Meaning |
+|---|---|---|
+| `InpMode` | Trend-aligned | `Both sides` = v1-style grid on buys and sells |
+| `InpSignalTF` / `InpTrendTF` | H1 / H4 | ATR/ADX/Bands timeframe, and trend EMA (50/200) timeframe |
+| `InpDailyTargetPct` | 1.5 | Close all and stop for the day at +1.5% of the day-start balance |
+| `InpMoneyPer001Lot` | 300 | 0.01 lot per $300 of balance/equity (lower = more risk) |
+| `InpMaxLevels` | 4 | Max trades per side |
+| `InpUseLock` / `InpLockDDPct` | on / 10 | Hedge lock at 10% cycle drawdown |
+| `InpHardStopPct` | 30 | Close the whole cycle at 30% drawdown (0 = off, not recommended) |
+| `InpUseNews` | on | Pause new trades 60 min before / 30 min after high-impact news (not in the tester) |
+| `InpFridayClose` | on | Friday from 20:00 server time: close if in profit, no new trades |
+
+## Running it with $100
+- At `InpMoneyPer001Lot = 300`, a $100 Standard account would need 0.0033 lot, which is below the 0.01 minimum.
+  The EA then **does not trade** and shows a message on the chart. Your options:
+  1. **Exness Standard Cent account** (if your region offers it on MT5): $100 = 10,000 USC, so it works exactly as designed.
+  2. Deposit $300 or more on a Standard account.
+  3. Set `InpAllowMinLot = true`: it trades 0.01 lot on $100, which is **3× the tested risk** (about v1's risk level).
+- Attach it to **EURUSD** (any chart timeframe; signals use H1/H4). Gold needs `InpMaxSpreadPoints` ≈ 300 and is much riskier.
+- In MetaEditor press F7 to compile. It was syntax-checked here with `tools/mql_syntax_check` (a C++ shim),
+  but not compiled with MetaEditor, so fix anything MetaEditor reports before using it.
+- Run one copy per symbol. The daily target uses the whole account's equity.
