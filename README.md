@@ -175,7 +175,7 @@ fills all its levels and gets stuck. V-shaped moves also loaded buy and sell gri
 | Setting | 2.0 (EURUSD) | Gold 2.1 |
 |---|---|---|
 | Grid / TP spacing | 2 × ATR(H1) | **1.5 × ATR(D1)** (`InpATRTF`, `InpGridATR`) |
-| Lot size | $300 per 0.01 lot | **0.5% of equity per 1 × ATR(D1) move** (`InpRiskPerATRPct`), so risk stays the same at $1,300 or $4,000 gold |
+| Lot size | $300 per 0.01 lot | **% of equity lost per 1 × ATR(D1) move**, so risk stays the same at $1,300 or $4,000 gold. `InpRiskMode`: **SAFE 0.5%** (default), AGGRESSIVE 1.0%, or CUSTOM (`InpRiskPerATRPct`) |
 | Trend filter | H4 EMA 50/200 | **D1 EMA 50/200** |
 | Grids | both sides could fill | **only one side may build a grid at a time** (`InpOneGridOnly`) |
 | Lock (10%) / hard stop (30%) drawdown | from cycle start | **from the cycle's equity peak**, so a long cycle can't hide a 40% giveback |
@@ -207,13 +207,36 @@ Gold 2.1 (risk 0.5) year by year, 2006–2019 run: −0.4, +12.4, +2.4, +8.6, +1
   wrong reference, and grids got stranded. It was also used to choose the safer 0.5 risk. So it is not a clean
   out-of-sample test. This is a simulation on hourly bars (no ticks, no slippage, no news filter), not a promise.
 
+## Can it make 4–5% a day? (risk ladder)
+Same Gold 2.1 logic on the same 6 tests (2006–19, mirrored, 2013–19, 3 random walks), only the risk changed.
+Script: `research/hedge_sim/gold_risk_ladder.py`.
+
+| Risk per daily ATR | Average per day | Max drawdown | Tests in profit | What happened |
+|---|---|---|---|---|
+| **0.5% (SAFE, default)** | −0.02% … +0.015% | 11–38% | 5 of 6 | survived every test |
+| 1.0% (AGGRESSIVE) | −0.06% … +0.04% | 33–73% | 4 of 6 | survived, deep drawdowns on random data |
+| 2.0% | −0.06% … −0.01% | 62–86% | 0 of 6 | the 30% hard stop fired 4–7 times per test |
+| 3.0% | −0.10% … +0.05% | 56–95% | 1 of 6 | |
+| 5.0% | −0.10% … −0.02% | 85–99% | 0 of 6 | |
+| 8.0% | −0.24% … −0.02% | 87–100% | 0 of 6 | 4 tests lost 90% within 1.3–6 years |
+| ≈50% = **0.01 lot on a $100 Standard account** at today's gold volatility | −0.40% … −0.18% | ~100% | 0 of 6 | every test lost 90% within 6–26 months |
+
+- **The best single run in the whole ladder made about +0.06% a day, roughly 80× below 4–5% a day.** It was one lucky
+  run at 5% risk; the other runs at that risk lost 54–97%. Raising the risk made results worse, not better, because
+  each step up hit the hard stop more often.
+- Setting the daily target to 4.5% instead of 1.5% changed almost nothing. It was reached on at most 3% of days, and
+  only at risk levels that destroyed the account.
+- 4% a day compounds to about 18,000× in a year (250 trading days), and 5% to about 200,000×. EAs advertised with
+  4–5% daily results are grids or martingales that look smooth for weeks or months and then lose everything.
+  Pick two: high daily profit, small drawdowns, no stop loss. You cannot have all three.
+
 ## Running it with $100
-- Lot size = equity × 0.5% ÷ (ATR(D1) × 100). To trade even 0.01 lot you need about **200 × the daily ATR** in your
-  account currency. At a daily ATR of $60 that is **12,000** (USC on a Cent account = $120; USD on a Standard account = $12,000).
-- If the safe lot is below the broker minimum, the EA **does not trade** and shows a message on the chart. Options:
-  1. **Exness Standard Cent account**, if it is available on MT5 for you: $100 = 10,000 USC. If gold's ATR is above
-     about $50, add a little more or use risk 1.0.
-  2. `InpRiskPerATRPct = 1.0` halves the money needed, but doubles the risk (see the table above).
-  3. `InpAllowMinLot = true` on a $100 Standard account trades 0.01 lot, which is roughly **100× the tested risk**.
-     One normal day of gold can move $50–80, which is 50–80% of the account. That is all-or-nothing, not this strategy.
+- Lot size = equity × risk% ÷ (ATR(D1) × 100). If that is below the broker minimum (0.01), the EA still uses 0.01 as long
+  as it is at most 2× the safe size (`InpMinLotRiskCap`). Otherwise it **does not trade** and the chart shows the
+  balance needed. The panel always shows "Balance needed for min lot".
+- Balance needed for 0.01 lot ≈ **100 × daily ATR** (SAFE) or **50 × daily ATR** (AGGRESSIVE), in account currency.
+  At a daily ATR of $60 that is 6,000 / 3,000:
+  - **Exness Standard Cent account** (if available on MT5 for you): $100 = 10,000 USC, so **it runs in both modes**.
+  - **$100 Standard account: it will not trade** (it would need $6,000 / $3,000). Forcing 0.01 lot with
+    `InpMinLotRiskCap = 1000` is the last row of the risk ladder: every test lost 90% or more.
 - Test in the MT5 Strategy Tester ("Every tick based on real ticks") on recent years, then on a demo account.

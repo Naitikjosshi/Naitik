@@ -6,8 +6,9 @@
 //|  hourly data (2006-2019, see README / research/hedge_sim):       |
 //|   - Grid, TP and lot size scale with the DAILY ATR. Gold swings  |
 //|     $50-100 in a few days, so hourly-ATR grids were far too tight|
-//|   - Lot size = % of equity lost per 1 x ATR(D1) move (0.5%), so  |
-//|     the risk stays the same at $1300 or $4000 gold               |
+//|   - Lot size = % of equity lost per 1 x ATR(D1) move, so the     |
+//|     risk stays the same at $1300 or $4000 gold. Risk modes:      |
+//|     SAFE 0.5% (default), AGGRESSIVE 1.0%, or CUSTOM              |
 //|   - Trend from D1 EMA 50/200; grid only with that trend          |
 //|   - Only one side may build a grid at a time                     |
 //|   - Lock and hard stop measure drawdown from the cycle's equity  |
@@ -31,6 +32,13 @@ enum ENUM_HD_MODE
    HD_BOTH_SIDES    = 1  // Both sides: grid on buys and sells (v1 style)
 };
 
+enum ENUM_RISK_MODE
+{
+   RISK_SAFE       = 0, // Safe: 0.5% per daily ATR (best survival in tests)
+   RISK_AGGRESSIVE = 1, // Aggressive: 1.0% per daily ATR (more profit, ~35% drawdowns)
+   RISK_CUSTOM     = 2  // Custom: use InpRiskPerATRPct
+};
+
 input group "Strategy mode"
 input ENUM_HD_MODE    InpMode          = HD_TREND_ALIGNED; // Grid mode
 input ENUM_TIMEFRAMES InpSignalTF      = PERIOD_H1;        // Signal timeframe (ADX, Bands, candle check)
@@ -43,10 +51,11 @@ input group "Daily target"
 input double InpDailyTargetPct    = 1.5;   // Close all & stop for the day at +% of day-start balance (0 = off)
 
 input group "Position sizing"
-input double InpRiskPerATRPct     = 0.5;   // % of equity one base trade loses per 1 x ATR move (1.0 = aggressive)
+input ENUM_RISK_MODE InpRiskMode  = RISK_SAFE; // Risk mode
+input double InpRiskPerATRPct     = 0.5;   // Custom risk: % of equity one trade loses per 1 x ATR move
+input double InpMinLotRiskCap     = 2.0;   // Use the broker minimum lot if it is at most this many x the safe lot (0 = never)
 input double InpLotMultiplier     = 1.0;   // Lot multiplier per grid level (1.0 = no martingale)
 input double InpMaxTotalLots      = 0.0;   // Max total open lots (0 = no cap)
-input bool   InpAllowMinLot       = false; // Trade the broker minimum lot even if it is above the safe size
 
 input group "Grid"
 input int    InpATRPeriod         = 14;    // ATR period
@@ -158,7 +167,7 @@ int OnInit()
       return INIT_FAILED;
    }
    if(InpMaxLevels < 1 || InpGridATR <= 0 || InpTpATR <= 0 || InpBasketTpATR <= 0 ||
-      InpGridExpansion < 1.0 || InpLotMultiplier < 1.0 || InpRiskPerATRPct <= 0 ||
+      InpGridExpansion < 1.0 || InpLotMultiplier < 1.0 || RiskPct() <= 0 || InpMinLotRiskCap < 0 ||
       InpTrendFastEMA >= InpTrendSlowEMA || InpLockRatio <= 0 || InpATRPeriod < 1)
    {
       Print("Invalid inputs: check grid, risk and EMA settings");
@@ -166,6 +175,9 @@ int OnInit()
    }
    if(StringFind(_Symbol, "XAU") < 0)
       PrintFormat("Note: HedgeDaily Gold is tuned for XAUUSD, but it is running on %s.", _Symbol);
+   if(RiskPct() > 1.0)
+      PrintFormat("WARNING: risk %.1f%% per ATR. In the 2006-2019 gold simulation every setting above 1.0%% "
+                  "lost money and drawdowns reached 60-100%%.", RiskPct());
 
    hATR   = iATR(_Symbol, InpATRTF, InpATRPeriod);
    hADX   = iADXWilder(_Symbol, InpSignalTF, InpADXPeriod);
@@ -772,25 +784,54 @@ double MoneyPerPriceUnit()
    return tickValue / tickSize;
 }
 
-//--- base lot loses InpRiskPerATRPct of equity when price moves 1 x ATR
+double RiskPct()
+{
+   if(InpRiskMode == RISK_SAFE)
+      return 0.5;
+   if(InpRiskMode == RISK_AGGRESSIVE)
+      return 1.0;
+   return InpRiskPerATRPct;
+}
+
+string RiskName()
+{
+   if(InpRiskMode == RISK_SAFE)
+      return "SAFE";
+   if(InpRiskMode == RISK_AGGRESSIVE)
+      return "AGGRESSIVE";
+   return "CUSTOM";
+}
+
+//--- balance needed before the EA may trade the broker's minimum lot
+double MinBalanceForMinLot()
+{
+   double perUnit = MoneyPerPriceUnit();
+   if(perUnit <= 0 || sATR <= 0)
+      return 0;
+   double minL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   return minL * sATR * perUnit / (RiskPct() / 100.0) / MathMax(InpMinLotRiskCap, 1.0);
+}
+
+//--- base lot loses RiskPct() of equity when price moves 1 x ATR
 double LotsForLevel(const int level)
 {
    double perUnit = MoneyPerPriceUnit();
    if(perUnit <= 0 || sATR <= 0)
       return 0;
    double money = MathMin(AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY));
-   double base  = money * InpRiskPerATRPct / 100.0 / (sATR * perUnit);
+   double base  = money * RiskPct() / 100.0 / (sATR * perUnit);
    double raw   = base * MathPow(InpLotMultiplier, level);
    double minL  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    if(raw < minL)
    {
-      if(!InpAllowMinLot)
+      // A small account may use the minimum lot if it is only a little above the safe size
+      if(InpMinLotRiskCap <= 0 || minL > raw * InpMinLotRiskCap + 1e-12)
       {
+         double need = MinBalanceForMinLot();
          if(g_lotWarn == "")
-            PrintFormat("Safe lot %.4f is below the broker minimum %.2f (gold moves %.2f per day). "
-                        "Use a Cent account, add balance, or set InpAllowMinLot = true (much higher risk).",
-                        raw, minL, sATR);
-         g_lotWarn = StringFormat("Balance too small: safe lot %.4f < min %.2f (use a Cent account)", raw, minL);
+            PrintFormat("Balance too small for gold right now: safe lot %.4f, broker minimum %.2f, daily ATR %.2f. "
+                        "Need about %.0f in account currency (or a Cent account).", raw, minL, sATR, need);
+         g_lotWarn = StringFormat("Balance too small: need about %.0f for %.2f lot (Cent account recommended)", need, minL);
          return 0;
       }
       raw = minL;
@@ -919,8 +960,12 @@ void ShowPanel(const double equity, const double balance, const double cycleDD)
    text += StringFormat("Buys: %d (%.2f lots)   Sells: %d (%.2f lots)   Open P/L: %.2f\n",
                         CountSide(1), SideLots(1), CountSide(-1), SideLots(-1), FloatingProfit());
    if(sReady)
-      text += StringFormat("ATR %s: %.2f   Grid step: %.2f   TP: %.2f   Risk/ATR: %.1f%%\n",
-                           EnumToString(InpATRTF), sATR, GridDistance(), TpDistance(), InpRiskPerATRPct);
+   {
+      text += StringFormat("ATR %s: %.2f   Grid step: %.2f   TP: %.2f\n",
+                           EnumToString(InpATRTF), sATR, GridDistance(), TpDistance());
+      text += StringFormat("Risk: %s %.1f%% per ATR   Balance needed for min lot: %.0f\n",
+                           RiskName(), RiskPct(), MinBalanceForMinLot());
+   }
    if(g_lotWarn != "")
       text += g_lotWarn + "\n";
    if(g_news != "")
