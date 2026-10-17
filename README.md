@@ -157,3 +157,63 @@ v2 month by month on the real data: +13.4%, +19.8%, +20.2%, +1.6%, +4.2%, −4.6
 - In MetaEditor press F7 to compile. It was syntax-checked here with `tools/mql_syntax_check` (a C++ shim),
   but not compiled with MetaEditor, so fix anything MetaEditor reports before using it.
 - Run one copy per symbol. The daily target uses the whole account's equity.
+
+---
+
+# HedgeDaily Gold 2.1 — XAUUSD version
+
+`MQL5/Experts/HedgeDailyGold.mq5`. **Needs an MT5 hedging account.** Attach it to the XAUUSD chart
+(any suffix works, e.g. `XAUUSDm`, `XAUUSDc`). It holds buys and sells together, uses no stop loss on trades,
+and stops for the day at the daily target, like 2.0.
+
+## Why gold needs its own version
+On 13 years of XAUUSD hourly data, **v1 blew the account within 45–82 days in every test**, and the EURUSD 2.0
+settings lost 87–99.9%. Gold often moves $50–100 in a few days, so a grid spaced on the *hourly* ATR ($3–8)
+fills all its levels and gets stuck. V-shaped moves also loaded buy and sell grids at the same time.
+
+## What is different from 2.0
+| Setting | 2.0 (EURUSD) | Gold 2.1 |
+|---|---|---|
+| Grid / TP spacing | 2 × ATR(H1) | **1.5 × ATR(D1)** (`InpATRTF`, `InpGridATR`) |
+| Lot size | $300 per 0.01 lot | **0.5% of equity per 1 × ATR(D1) move** (`InpRiskPerATRPct`), so risk stays the same at $1,300 or $4,000 gold |
+| Trend filter | H4 EMA 50/200 | **D1 EMA 50/200** |
+| Grids | both sides could fill | **only one side may build a grid at a time** (`InpOneGridOnly`) |
+| Lock (10%) / hard stop (30%) drawdown | from cycle start | **from the cycle's equity peak**, so a long cycle can't hide a 40% giveback |
+| Spread filter | 30 points | **3% of ATR(D1)** (gold spreads jump at rollover and news) |
+| News filter | 60 / 30 min | USD high-impact news, 60 / 60 min |
+
+## Simulation results (XAUUSD H1, 2006 – Feb 2019, real bid/ask spreads, $10,000 start)
+Scripts: `research/hedge_sim/gold_tests.py` (data download steps are in `gold.py`).
+
+| Test | v1 | 2.0 EURUSD settings | **Gold 2.1, risk 0.5 (default)** | Gold 2.1, risk 1.0 |
+|---|---|---|---|---|
+| 2006–2012 bull market | blown in 45 days | −99.9% | **+62.8%** (max DD 10.9%) | +293.7% (max DD 29.0%) |
+| 2013–2019 crash, bear, range | blown in 82 days | −88.5% | **+17.3%** (max DD 30.7%) | +87.6% (max DD 34.1%) |
+| 2006–2019 mirrored (bull ↔ bear) | blown | −99.7% | **+59.2%** (max DD 15.2%) | +101.6% (max DD 32.6%) |
+| 3 random walks (no trend) | all blown | −87% … −94% | −35.6%, +10.7%, +32.1% | −68.4%, −9.7%, +31.6% |
+| 2006–2019 **with swap costs** | — | — | **+16.9%** (max DD 17.4%) | **−30.6%** (max DD 60.9%) |
+| Days the 1.5% daily target was hit | — | — | 0 | ≤ 5 |
+
+Gold 2.1 (risk 0.5) year by year, 2006–2019 run: −0.4, +12.4, +2.4, +8.6, +16.3, +12.3, 0.0, 0.0, −3.7, −3.1, +2.2, +4.0, −0.5, +1.2 (%).
+
+**How to read this honestly**
+- The default settings made about **4% a year** in the simulation, not 1–2% a day. The 1.5% daily target was never reached.
+- Risk 1.0 made about 12% a year, with 30–35% drawdowns, and it **lost money once swap costs were included**.
+- **Swap matters a lot**: trades stay open for weeks or months. Swap costs cut +62.6% to +16.9% at risk 0.5. Use an
+  Exness **swap-free** account if it is offered to you.
+- No stop loss has a price. In the full run, buys from the 2011 top ($1,650–1,900) and a 2006 sell hedge stayed open
+  until the data ended in 2019. The money was tied up for 7 years.
+- Settings were picked on 2006–2012. The 2013–2019 data was then used to find two bugs: drawdown was measured from the
+  wrong reference, and grids got stranded. It was also used to choose the safer 0.5 risk. So it is not a clean
+  out-of-sample test. This is a simulation on hourly bars (no ticks, no slippage, no news filter), not a promise.
+
+## Running it with $100
+- Lot size = equity × 0.5% ÷ (ATR(D1) × 100). To trade even 0.01 lot you need about **200 × the daily ATR** in your
+  account currency. At a daily ATR of $60 that is **12,000** (USC on a Cent account = $120; USD on a Standard account = $12,000).
+- If the safe lot is below the broker minimum, the EA **does not trade** and shows a message on the chart. Options:
+  1. **Exness Standard Cent account**, if it is available on MT5 for you: $100 = 10,000 USC. If gold's ATR is above
+     about $50, add a little more or use risk 1.0.
+  2. `InpRiskPerATRPct = 1.0` halves the money needed, but doubles the risk (see the table above).
+  3. `InpAllowMinLot = true` on a $100 Standard account trades 0.01 lot, which is roughly **100× the tested risk**.
+     One normal day of gold can move $50–80, which is 50–80% of the account. That is all-or-nothing, not this strategy.
+- Test in the MT5 Strategy Tester ("Every tick based on real ticks") on recent years, then on a demo account.

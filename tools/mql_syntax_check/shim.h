@@ -71,6 +71,7 @@ datetime TimeTradeServer();
 bool TimeToStruct(datetime, MqlDateTime&);
 string TimeToString(datetime, int);
 string IntegerToString(long);
+int StringFind(const string&, const string&, int start = 0);
 string DoubleToString(double, int);
 string EnumToString(ENUM_TIMEFRAMES);
 bool CalendarValueHistory(Arr<MqlCalendarValue>&, datetime, datetime, const string&, const string&);

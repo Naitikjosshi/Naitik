@@ -25,11 +25,11 @@ class Base:
 # ---------------------------------------------------------------- v1
 class V1(Base):
     def __init__(self, target=1.5, basket=0.3, lot_per_100=0.01, mult=1.0,
-                 tp_pts=150, grid_pts=200, max_levels=6, eq_stop=40.0, hours=(1, 22)):
+                 tp_pts=150, grid_pts=200, max_levels=6, eq_stop=40.0, hours=(1, 22), point=POINT):
         super().__init__()
         self.target, self.basket = target, basket
         self.lot_per_100, self.mult = lot_per_100, mult
-        self.tp, self.grid = tp_pts * POINT, grid_pts * POINT
+        self.tp, self.grid = tp_pts * point, grid_pts * point
         self.max_levels, self.eq_stop, self.hours = max_levels, eq_stop, hours
 
     def on_tick(self, e, t, row):
@@ -82,6 +82,10 @@ V2_DEFAULTS = dict(
     use_lock=True, lock_dd=10.0, lock_ratio=1.0,
     lock_trail_start_atr=1.0, lock_trail_atr=1.0, lock_exit_atr=1.0, relock_step=3.0,
     hard_stop=25.0, hours=(1, 22), friday_close_hour=20,
+    risk_atr_pct=0.0,  # >0: base lot loses this % of equity per 1 x ATR move (overrides lot_per_100)
+    dd_mode="start",   # "start": drawdown vs equity at cycle start, "peak": vs the cycle's equity high
+    cycle_tp=0.0,      # >0: close everything when equity is this % above the cycle's starting equity
+    max_cycle_days=0,  # >0: close everything when a cycle has been open this many calendar days
 )
 
 
@@ -95,6 +99,7 @@ class V2(Base):
         cfg.update(kw)
         self.c = cfg
         self.cycle_start = None
+        self.cycle_t0 = None
         self.last_unlock_dd = 0.0
         self.was_locked = False
         self.locks = 0
@@ -106,9 +111,17 @@ class V2(Base):
         return min(e.balance, e.equity())
 
     def lot(self, e, level):
-        return round_lot(self.size_base(e) / 100 * self.c["lot_per_100"] * self.c["mult"] ** level)
+        c = self.c
+        if c["risk_atr_pct"] > 0:
+            atr = self.row["atr"]
+            base = self.size_base(e) * c["risk_atr_pct"] / 100 / (atr * e.contract)
+        else:
+            base = self.size_base(e) / 100 * c["lot_per_100"]
+        return round_lot(base * c["mult"] ** level)
 
     def reset_cycle(self):
+        self.cycle_t0 = None
+        self.cycle_peak = None
         self.cycle_start = None
         self.last_unlock_dd = 0.0
         self.was_locked = False
@@ -131,7 +144,18 @@ class V2(Base):
 
         if not e.pos:
             self.reset_cycle()
-        cycle_dd = (self.cycle_start - eq) / self.cycle_start * 100 if self.cycle_start else 0.0
+        if c["cycle_tp"] > 0 and self.cycle_start and eq >= self.cycle_start * (1 + c["cycle_tp"] / 100):
+            e.close_all(); self.reset_cycle(); self.cycle_closes = getattr(self, "cycle_closes", 0) + 1
+            return
+        if c["max_cycle_days"] > 0 and self.cycle_start and e.pos:
+            if self.cycle_t0 is not None and (t - self.cycle_t0).days >= c["max_cycle_days"]:
+                e.close_all(); self.reset_cycle(); self.time_stops = getattr(self, "time_stops", 0) + 1
+                return
+        ref = self.cycle_start
+        if self.cycle_start and c["dd_mode"] == "peak":
+            self.cycle_peak = max(getattr(self, "cycle_peak", None) or self.cycle_start, eq)
+            ref = self.cycle_peak
+        cycle_dd = (ref - eq) / ref * 100 if ref else 0.0
         if c["hard_stop"] > 0 and cycle_dd >= c["hard_stop"]:
             e.close_all(); self.done = True; self.hard_stops += 1; self.reset_cycle()
             return
@@ -149,9 +173,9 @@ class V2(Base):
         if any(p.role == "lock" for p in e.pos):
             return
 
-        grid = max(atr * c["grid_atr"], c["min_grid_pips"] * PIP)
-        tpd = max(atr * c["tp_atr"], c["min_tp_pips"] * PIP)
-        bd = max(atr * c["basket_atr"], c["min_tp_pips"] * PIP)
+        grid = max(atr * c["grid_atr"], c["min_grid_pips"] * e.pip)
+        tpd = max(atr * c["tp_atr"], c["min_tp_pips"] * e.pip)
+        bd = max(atr * c["basket_atr"], c["min_tp_pips"] * e.pip)
         if t.weekday() < 5 and c["hours"][0] <= t.hour < c["hours"][1]:
             for side in (1, -1):
                 self.manage_side(e, side, row, grid, tpd, eq)
@@ -198,6 +222,7 @@ class V2(Base):
             return
         if self.cycle_start is None:
             self.cycle_start = eq
+            self.cycle_t0 = e.t
         tp = e.ask + tpd if side == 1 else e.bid - tpd
         e.open(side, lots, tp=tp)
         e.stats["max_levels"] = max(e.stats["max_levels"], n + 1)
@@ -259,7 +284,9 @@ class V2(Base):
 class V3(V2):
     """Hedge pair always on; grid adds only on the side of the higher-TF trend."""
 
-    EXTRA = dict(grid_none=False, start_filter="any", trend_buffer_atr=0.0, reducer=False)
+    EXTRA = dict(grid_none=False, start_filter="any", trend_buffer_atr=0.0, reducer=False,
+                 atr_source="h1", bias_source="h4", one_grid=False,
+                 flip_action="none", flip_level="opposite", flip_min_levels=2)
 
     def __init__(self, **kw):
         extra = {k: kw.pop(k) for k in list(kw) if k in self.EXTRA}
@@ -267,10 +294,32 @@ class V3(V2):
         self.x = dict(self.EXTRA)
         self.x.update(extra)
 
+    def on_bar(self, e, t, row):
+        if self.x["atr_source"] == "d1":
+            row = dict(row)
+            row["atr"] = row["atr_d"]
+        self.row = row
+
     def on_tick(self, e, t, row):
+        row = self.row
         if self.cycle_start is not None and not e.pos:
             self.cycle_bal = None
+        if self.x["flip_action"] != "none" and e.pos and row["atr"] == row["atr"]:
+            self.check_flip(e, row)
         super().on_tick(e, t, row)
+
+    def check_flip(self, e, row):
+        """Trend turned against a loaded grid: close it (a regime exit, not a fixed SL)."""
+        b = self.bias(row)
+        for side in (1, -1):
+            ps = self.grid_pos(e, side)
+            if len(ps) < self.x["flip_min_levels"]:
+                continue
+            against = (b == -side) if self.x["flip_level"] == "opposite" else (b != side)
+            if against and self.x["flip_action"] == "close":
+                for p in ps:
+                    e.close(p)
+                self.flips = getattr(self, "flips", 0) + 1
         if self.x["reducer"] and e.pos and getattr(self, "cycle_bal", None) is not None:
             if not any(p.role == "lock" for p in e.pos):
                 self.reduce(e)
@@ -286,7 +335,10 @@ class V3(V2):
             e.close(worst)
 
     def bias(self, row):
-        f, s, c = row["ema_f"], row["ema_s"], row["close"]
+        if self.x["bias_source"] == "d1":
+            f, s, c = row["ema_fd"], row["ema_sd"], row["close"]
+        else:
+            f, s, c = row["ema_f"], row["ema_s"], row["close"]
         buf = self.x["trend_buffer_atr"] * row["atr"]
         if f > s and c > s + buf:
             return 1
@@ -306,6 +358,8 @@ class V3(V2):
             if b == 0 and not self.x["grid_none"]:
                 return
             if b != 0 and side != b:
+                return
+            if self.x["one_grid"] and len(self.grid_pos(e, -side)) > 1:
                 return
             step = grid * c["expansion"] ** (n - 1)
             if side == 1:
@@ -330,6 +384,7 @@ class V3(V2):
         if self.cycle_start is None:
             self.cycle_start = eq
             self.cycle_bal = e.balance
+            self.cycle_t0 = e.t
         tp = e.ask + tpd if side == 1 else e.bid - tpd
         e.open(side, lots, tp=tp)
         e.stats["max_levels"] = max(e.stats["max_levels"], n + 1)

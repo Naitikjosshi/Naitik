@@ -42,6 +42,17 @@ def indicators(df, atr_n=14, adx_n=14, bb_n=20, bb_dev=2.0, rsi_n=14):
     loss = wilder((-delta).clip(lower=0), rsi_n)
     rsi = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
 
+    # daily bars (server days) -> previous day's ATR(14) and EMA(50/200), mapped back to each hour
+    day = df.index.normalize()
+    d = pd.DataFrame({"h": h.groupby(day).max(), "l": l.groupby(day).min(), "c": c.groupby(day).last()})
+    dpc = d.c.shift(1)
+    dtr = pd.concat([d.h - d.l, (d.h - dpc).abs(), (d.l - dpc).abs()], axis=1).max(axis=1)
+    daily = pd.DataFrame({"atr_d": dtr.rolling(atr_n).mean(),
+                          "ema_fd": d.c.ewm(span=50, adjust=False).mean(),
+                          "ema_sd": d.c.ewm(span=200, adjust=False).mean()}).shift(1)
+    daily = daily.reindex(day)
+    daily.index = df.index
+
     ind = pd.DataFrame({
         "atr": atr, "adx": adx, "pdi": pdi, "mdi": mdi,
         "bb_up": mid + bb_dev * sd, "bb_lo": mid - bb_dev * sd, "bb_mid": mid,
@@ -49,7 +60,8 @@ def indicators(df, atr_n=14, adx_n=14, bb_n=20, bb_dev=2.0, rsi_n=14):
         "ema_f": c.ewm(span=200, adjust=False).mean(),   # ~ H4 EMA50
         "ema_s": c.ewm(span=800, adjust=False).mean(),   # ~ H4 EMA200
     })
-    return ind.shift(1)  # decisions in bar i only see bar i-1
+    ind = ind.shift(1)  # decisions in bar i only see bar i-1
+    return pd.concat([ind, daily], axis=1)  # daily values are already from the previous day
 
 
 # ---------------------------------------------------------------- engine
@@ -63,14 +75,23 @@ class Pos:
 
 class Engine:
     def __init__(self, df, strategy, balance=10_000.0, spread_pips=1.0,
-                 swap_long=0.0, swap_short=0.0, tick_pips=0.5):
+                 swap_long=0.0, swap_short=0.0, tick_pips=0.5,
+                 contract=CONTRACT, pip=PIP, swap_pct=None, min_spread_pct=0.01):
+        """contract: units per lot; pip: price unit used for spread/tick/min distances.
+        swap_long/short: pips per lot per night, or with swap_pct=(long, short) an annual %
+        of the position's notional (negative = cost). A "Spread" column in df (price units)
+        overrides spread_pips per bar, floored at min_spread_pct % of price."""
         self.df = df
         self.s = strategy
         self.balance = balance
         self.start_balance = balance
-        self.spread = spread_pips * PIP
+        self.contract = contract
+        self.pip = pip
+        self.spread = spread_pips * pip
         self.swap = {1: swap_long, -1: swap_short}  # pips per lot per rollover
-        self.step = tick_pips * PIP
+        self.swap_pct = swap_pct
+        self.min_spread_pct = min_spread_pct
+        self.step = tick_pips * pip
         self.pos = []
         self.next_id = 1
         self.bid = self.ask = None
@@ -82,8 +103,8 @@ class Engine:
     # --- account
     def pnl(self, p):
         if p.side == 1:
-            return (self.bid - p.entry) * CONTRACT * p.lots
-        return (p.entry - self.ask) * CONTRACT * p.lots
+            return (self.bid - p.entry) * self.contract * p.lots
+        return (p.entry - self.ask) * self.contract * p.lots
 
     def floating(self):
         return sum(self.pnl(p) for p in self.pos)
@@ -107,11 +128,11 @@ class Engine:
         if price is None:
             pnl = self.pnl(p)
         else:
-            pnl = ((price - p.entry) if p.side == 1 else (p.entry - price)) * CONTRACT * p.lots
+            pnl = ((price - p.entry) if p.side == 1 else (p.entry - price)) * self.contract * p.lots
         self.balance += pnl
         self.pos.remove(p)
         self.stats["closed"] += 1
-        self.stats["spread_cost"] += p.lots * self.spread * CONTRACT
+        self.stats["spread_cost"] += p.lots * self.spread * self.contract
         return pnl
 
     def close_all(self, role=None):
@@ -136,7 +157,12 @@ class Engine:
     def apply_swap(self, old_date):
         mult = 3 if old_date.weekday() == 2 else 1
         for p in self.pos:
-            self.balance += self.swap[p.side] * 10.0 * p.lots * mult
+            if self.swap_pct is not None:
+                rate = self.swap_pct[0] if p.side == 1 else self.swap_pct[1]
+                notional = (self.bid or p.entry) * self.contract * p.lots
+                self.balance += notional * rate / 100.0 / 360.0 * mult
+            else:
+                self.balance += self.swap[p.side] * self.pip * self.contract * p.lots * mult
 
     # --- run
     def ticks(self, o, h, l, c):
@@ -154,6 +180,7 @@ class Engine:
         prev_date = None
         idx = df.index
         O, H, L, C = df.Open.values, df.High.values, df.Low.values, df.Close.values
+        SP = df["Spread"].values if "Spread" in df.columns else None
         rows = ind.to_dict("records")
         for i in range(warmup, len(df)):
             t = idx[i]
@@ -161,6 +188,8 @@ class Engine:
             if prev_date is not None and d != prev_date:
                 self.apply_swap(prev_date)
             prev_date = d
+            if SP is not None:
+                self.spread = max(SP[i], C[i] * self.min_spread_pct / 100.0)
             self.s.on_bar(self, t, rows[i])
             for k, price in enumerate(self.ticks(O[i], H[i], L[i], C[i])):
                 self.t = t
