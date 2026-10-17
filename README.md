@@ -63,3 +63,30 @@ the strategy (the expected value of a trade is roughly zero, and the spread and 
 With the default 2-trade plan it's roughly 1/4.5 × 1/2.6 ≈ **8–9%**. That means about **9 out of 10 runs lose the $100**.
 Raising `InpMaxRR` to 10 makes it a single trade with the same ~9% chance.
 Only use money you are fully prepared to lose.
+
+---
+
+# HedgeDailyEA — buy + sell hedge grid with a daily target
+
+`MQL5/Experts/HedgeDailyEA.mq5` keeps both a buy and a sell open and stops each day once it has made its target.
+**Needs an MT5 hedging account** (the Exness default).
+
+**How it works**
+- Opens 1 buy + 1 sell. Each trade has a small TP (`InpTakeProfitPoints`, default 150 points = 15 pips) and **no SL**.
+- When a trade hits its TP, a new one opens on the same side, so it stays hedged.
+- When a side is losing by `InpGridStepPoints` (200), it adds another trade on that side (up to `InpMaxLevels` = 6).
+  When price comes back, those trades recover.
+- **Basket close:** if all open trades together are +0.3% of equity, it closes everything and restarts fresh.
+- **Daily target:** once equity is **+1.5%** for the day (`InpDailyTargetPct`), it closes everything and stops until the next server day.
+- **Equity stop:** if equity drops 40% from the day's start, it closes everything (`InpEquityStopPct`, set 0 to disable).
+- `InpLotMultiplier` = 1.0 means no martingale. Raising it makes recovery faster, but blow-ups much bigger.
+
+**Lot sizing:** 0.01 lot per $100 balance. On a $100 account use a **Standard Cent** account (or keep 0.01) — on a
+dollar account a 6-level grid against a 120-pip trend is already a ~$40 floating loss at 0.01 lots.
+
+**The truth about "no stop loss":** a hedge does not remove risk. A buy + sell together only gain when price
+swings back and forth. In ranging markets it hits +1–2% days regularly. In a strong one-way trend (news, NFP, gold rallies)
+the losing side piles up and the floating loss grows faster and faster. One such day can wipe out weeks of +1.5% days.
+That's why the equity stop exists; turning it off means one bad trend can blow the account.
+Backtest at least 1–2 years (including trending months) and demo-test before going live.
+Best on ranging pairs like EURCHF, AUDNZD, EURGBP; avoid XAUUSD and news times.
