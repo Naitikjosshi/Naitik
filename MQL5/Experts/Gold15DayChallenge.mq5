@@ -1,7 +1,15 @@
 //+------------------------------------------------------------------+
 //|                                          Gold15DayChallenge.mq5  |
-//|  15-day XAUUSD challenge: DOUBLE the account ($10 -> $20,        |
-//|  $100 -> $200, $500 -> $1000), then it stops for good.           |
+//|  Two goals (InpGoal):                                            |
+//|   1% A DAY (default): one trade a day at 07:00 UTC, take profit  |
+//|     +1% of the day's equity, stop -1%, closed at 20:00 UTC.      |
+//|     Stops for good after a 20% drop from the peak.               |
+//|     2011-2018 ticks (research/xau_scalper/one_pct_day.py): 53%   |
+//|     of days hit +1%, median year +17%; but on uptrend days (like |
+//|     2026) about break-even: 48% of days +1%, -0.03% a day.       |
+//|     Needs ~$800 for 1% risk with an $8 stop on 0.01 lot.         |
+//|   DOUBLE: 15-day challenge to double the account ($10 -> $20,    |
+//|     $100 -> $200, $500 -> $1000), then it stops for good.        |
 //|                                                                  |
 //|  Target = starting equity x InpTargetMultiple (default 2).       |
 //|  Sizing modes:                                                   |
@@ -27,9 +35,9 @@
 //|  No martingale, no grid, no averaging down.                      |
 //+------------------------------------------------------------------+
 #property copyright "Naitik"
-#property version   "1.10"
-#property description "15-day gold challenge: double the account ($10->$20, $100->$200, $500->$1000)."
-#property description "Max-chance sizing: about half of all runs double, the other half lose ~90%. Stops for good at target, day 15 or bust."
+#property version   "1.20"
+#property description "Gold: 1% a day (one trade, +1% / -1%) or a 15-day challenge to double the account."
+#property description "1% a day hit on ~half the days in tests, about break-even in uptrends. Doubling: about half the runs."
 
 #include <Trade\Trade.mqh>
 
@@ -38,6 +46,12 @@ enum ENUM_CH_DIRECTION
    CH_TREND = 0, // Daily trend (D1 close vs EMA 20/50); skip mixed days
    CH_LONG  = 1, // Always buy
    CH_SHORT = 2  // Always sell
+};
+
+enum ENUM_CH_GOAL
+{
+   GOAL_DAILY  = 0, // 1% a day: one trade a day, +1% target / -1% stop, every day
+   GOAL_DOUBLE = 1  // Double the account in 15 days, then stop
 };
 
 enum ENUM_CH_SIZING
@@ -52,16 +66,28 @@ enum ENUM_CH_STATE
    CH_RUNNING  = 0,
    CH_TARGET   = 1,
    CH_DEADLINE = 2,
-   CH_BUST     = 3
+   CH_BUST     = 3,
+   CH_DRAWDOWN = 4
 };
 
-input group "Challenge"
+input group "Goal"
+input ENUM_CH_GOAL InpGoal        = GOAL_DAILY; // What to aim for
+
+input group "1% a day (InpGoal = 1% a day)"
+input double InpDailyTargetPct    = 1.0;   // Take profit = +this % of the day's starting equity
+input double InpDailyRiskPct      = 1.0;   // Stop = -this % (1 = best in tests; 3-10 win more days but lose over time)
+input double InpDailyMinStopUSD   = 8.0;   // Stop at least this far (USD per oz); less spread cost
+input int    InpDailyEntryHour    = 7;     // UTC hour of the daily trade
+input int    InpDailyCloseHour    = 20;    // UTC hour to close it if neither TP nor SL was hit
+input double InpMaxDrawdownPct    = 20.0;  // Stop for good when equity falls this % below its peak (0 = off)
+
+input group "Double in 15 days (InpGoal = Double)"
 input double InpTargetMultiple    = 2.0;   // Target = starting equity x this (2 = double)
 input double InpTargetEquity      = 0.0;   // Fixed target instead (0 = use the multiple)
 input int    InpDays              = 15;    // Stop for good after this many days from the first start
-input bool   InpResetState        = false; // Set true once to start a new challenge (then back to false)
+input bool   InpResetState        = false; // Set true once to start fresh (then back to false)
 
-input group "Trades"
+input group "Double: trades"
 input ENUM_CH_SIZING InpSizing   = SIZING_BOLD; // Sizing mode
 input double InpBoldMinStopUSD    = 8.0;   // Max chance: stop at least this far (USD per oz); wider is cheaper in spread
 input double InpBoldMaxLossPct    = 90.0;  // Max chance: never lose more than this % of equity in one trade
@@ -97,6 +123,9 @@ double   g_stop = 0.0;     // settings in use (Max chance: minimum stop)
 double   g_rr = 0.0;
 double   g_risk = 0.0;
 int      g_hours[];
+int      g_dayKey = 0;     // 1% a day: current UTC day, its starting equity, and the equity peak
+double   g_dayStart = 0.0;
+double   g_peak = 0.0;
 string   g_status = "starting";
 string   g_last = "";
 datetime g_lastPanel = 0;
@@ -135,9 +164,13 @@ int OnInit()
    if(InpStopUSD <= 0.0 || InpRR <= 0.0 || InpRiskPct <= 0.0 || InpRiskPct > 95.0 || InpMinLotMaxRiskPct <= 0.0 ||
       InpTargetMultiple <= 1.0 || InpTargetEquity < 0.0 || InpBoldMinStopUSD <= 0.0 || InpBoldMaxLossPct <= 0.0 ||
       InpBoldMaxLossPct > 95.0 ||
-      InpMinLotMaxRiskPct > 95.0 || InpDays < 1 || InpMaxTradesPerDay < 1 || InpTrendFast >= InpTrendSlow)
+      InpMinLotMaxRiskPct > 95.0 || InpDays < 1 || InpMaxTradesPerDay < 1 || InpTrendFast >= InpTrendSlow ||
+      InpDailyTargetPct <= 0.0 || InpDailyRiskPct <= 0.0 || InpDailyRiskPct > 20.0 || InpDailyMinStopUSD <= 0.0 ||
+      InpDailyEntryHour < 0 || InpDailyEntryHour > 23 || InpDailyCloseHour <= InpDailyEntryHour || InpDailyCloseHour > 24 ||
+      InpMaxDrawdownPct < 0.0 || InpMaxDrawdownPct >= 100.0)
    {
-      Print("[G15] Invalid inputs: stop, RR and risk must be > 0, risk <= 95%, days >= 1, fast EMA < slow EMA");
+      Print("[G15] Invalid inputs: stop, RR and risk must be > 0, risk <= 95% (daily <= 20%), days >= 1, ",
+            "fast EMA < slow EMA, daily close hour after the entry hour");
       return INIT_PARAMETERS_INCORRECT;
    }
    if(!ParseHours())
@@ -157,8 +190,12 @@ int OnInit()
       GVDel("start");
       GVDel("slot");
       GVDel("startEq");
+      GVDel("dKey");
+      GVDel("dStart");
+      GVDel("dTraded");
+      GVDel("peak");
       if(InpResetState)
-         Print("[G15] New challenge: saved state cleared. Set InpResetState back to false.");
+         Print("[G15] Fresh start: saved state cleared. Set InpResetState back to false.");
    }
    g_state = (int)GV("state", CH_RUNNING);
    g_start = (datetime)GV("start", 0.0);
@@ -176,7 +213,13 @@ int OnInit()
       GVSet("startEq", g_startEq);
    }
    g_target = (InpTargetEquity > 0.0) ? InpTargetEquity : g_startEq * InpTargetMultiple;
-   if(InpSizing == SIZING_BOLD)
+   if(InpGoal == GOAL_DAILY)
+   {
+      g_stop = InpDailyMinStopUSD;  // per-trade stop and target are sized in DailyTryEntry
+      g_rr   = InpDailyTargetPct / InpDailyRiskPct;
+      g_risk = InpDailyRiskPct;
+   }
+   else if(InpSizing == SIZING_BOLD)
    {
       g_stop = InpBoldMinStopUSD;   // per-trade stop and target are sized in TryEntry
       g_rr   = 0.0;
@@ -195,7 +238,10 @@ int OnInit()
       g_rr   = InpRR;
       g_risk = InpRiskPct;
    }
-   if(g_state == CH_RUNNING && equity >= g_target)
+   g_peak = MathMax(GV("peak", 0.0), equity);
+   g_dayKey = (int)GV("dKey", 0.0);
+   g_dayStart = GV("dStart", 0.0);
+   if(InpGoal == GOAL_DOUBLE && g_state == CH_RUNNING && equity >= g_target)
    {
       PrintFormat("[G15] Equity %.2f is already at the target %.2f: set InpResetState = true to start a new challenge",
                   equity, g_target);
@@ -215,11 +261,22 @@ int OnInit()
       Print("[G15] Failed to create indicator handles, error ", GetLastError());
       return INIT_FAILED;
    }
-   PrintFormat("[G15] %s | start %.2f, equity %.2f -> target %.2f in %d days (day %d now) | %s stop $%.2f, RR %.1f, risk %.0f%% | %s",
-               _Symbol, g_startEq, equity, g_target, InpDays, DayNumber(), SizingName(),
-               g_stop, g_rr, g_risk, StateName());
-   PrintFormat("[G15] Honest odds: at most ~%.0f%% to reach the target with no proven edge (doubling tested ~50%% max chance, ~42%% active)",
-               100.0 * g_startEq / g_target);
+   if(InpGoal == GOAL_DAILY)
+   {
+      PrintFormat("[G15] %s | 1%% a day: +%.1f%% / -%.1f%% per day, trade at %02d:00 UTC, stop >= $%.2f, max drawdown %.0f%% | equity %.2f | %s",
+                  _Symbol, InpDailyTargetPct, InpDailyRiskPct, InpDailyEntryHour, g_stop, InpMaxDrawdownPct, equity, StateName());
+      PrintFormat("[G15] Honest odds: ~half the days hit +%.1f%%, the rest lose %.1f%%; in uptrends about break-even in tests. "
+                  "Balance needed for 0.01 lot: about %.0f", InpDailyTargetPct, InpDailyRiskPct,
+                  (g_stop + InpSlippageUSD) * 100.0 * SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) / (InpDailyRiskPct / 100.0));
+   }
+   else
+   {
+      PrintFormat("[G15] %s | start %.2f, equity %.2f -> target %.2f in %d days (day %d now) | %s stop $%.2f, RR %.1f, risk %.0f%% | %s",
+                  _Symbol, g_startEq, equity, g_target, InpDays, DayNumber(), SizingName(),
+                  g_stop, g_rr, g_risk, StateName());
+      PrintFormat("[G15] Honest odds: at most ~%.0f%% to reach the target with no proven edge (doubling tested ~50%% max chance, ~42%% active)",
+                  100.0 * g_startEq / g_target);
+   }
    return INIT_SUCCEEDED;
 }
 
@@ -265,6 +322,12 @@ void OnTick()
    if(!SymbolInfoTick(_Symbol, tk) || tk.bid <= 0.0 || tk.ask < tk.bid)
       return;
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(InpGoal == GOAL_DAILY)
+   {
+      DailyTick(tk, equity);
+      ShowPanel(tk, equity);
+      return;
+   }
 
    if(g_state == CH_RUNNING)
    {
@@ -377,6 +440,7 @@ string StateName()
       case CH_TARGET:   return "TARGET REACHED - stopped. Withdraw your profit.";
       case CH_DEADLINE: return "15 DAYS OVER - stopped.";
       case CH_BUST:     return "NOT ENOUGH MONEY for a 0.01-lot stop - stopped.";
+      case CH_DRAWDOWN: return "MAX DRAWDOWN hit - stopped for good. Review before restarting.";
       default:          break;
    }
    return "running";
@@ -543,21 +607,9 @@ void TryEntry(const MqlTick &tk, const double equity)
    double lots = FloorVolume((InpSizing == SIZING_BOLD ? boldLoss : equity * g_risk / 100.0) / lpl);
    if(lots <= 0.0)
       lots = FloorVolume(vmin);
-   double margin = 0.0;
-   if(OrderCalcMargin(side > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, lots, entry, margin) && margin > 0.0)
-   {
-      double free = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-      if(margin > free * 0.8)
-      {
-         double fit = FloorVolume(lots * free * 0.8 / margin);
-         if(fit <= 0.0)
-         {
-            g_status = StringFormat("margin %.2f too high for free margin %.2f: raise the account leverage", margin, free);
-            return;
-         }
-         lots = fit;
-      }
-   }
+   lots = FitMargin(side, lots, entry);
+   if(lots <= 0.0)
+      return;
    double stopDist = g_stop;
    double tpDist = g_rr * g_stop;
    if(InpSizing == SIZING_BOLD)
@@ -566,19 +618,54 @@ void TryEntry(const MqlTick &tk, const double equity)
       stopDist = MathMax(g_stop, boldLoss / (lots * perLot) - InpSlippageUSD);
       tpDist = need / (lots * perLot) + spread;
    }
-   double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymPoint();
-   if(stopDist - spread <= minDist || tpDist <= minDist)
+   if(!StopsAllowed(stopDist, tpDist, spread))
+      return;
+   double sl = 0.0, tp = 0.0;
+   uint rc = 0;
+   bool sent = SendOrder(side, lots, stopDist, tpDist, entry, sl, tp, rc);
+   GVSet("slot", slotKey);   // one try per entry hour, filled or not
+   if(!sent)
    {
-      g_status = "stop closer than the broker allows";
+      Note(StringFormat("Order failed: %u %s", rc, trade.ResultRetcodeDescription()));
       return;
    }
-   double sl = NormPrice(entry - side * stopDist);
-   double tp = NormPrice(entry + side * tpDist);
+   Note(StringFormat("Day %d, %02d:00 UTC, %s: %s %.2f lots @ %.2f | SL %.2f (-%.2f) | TP %.2f (+%.2f)",
+                     DayNumber(), slotHour, why, side > 0 ? "BUY" : "SELL", lots, trade.ResultPrice(), sl,
+                     lots * perLot * (stopDist + InpSlippageUSD), tp, lots * perLot * tpDist));
+}
 
+// Shrink lots so the margin stays under 80% of free margin; 0 (with a status) if even the minimum does not fit
+double FitMargin(const int side, const double lots, const double entry)
+{
+   double margin = 0.0;
+   if(!OrderCalcMargin(side > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, lots, entry, margin) || margin <= 0.0)
+      return lots;
+   double free = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   if(margin <= free * 0.8)
+      return lots;
+   double fit = FloorVolume(lots * free * 0.8 / margin);
+   if(fit <= 0.0)
+      g_status = StringFormat("margin %.2f too high for free margin %.2f: raise the account leverage", margin, free);
+   return fit;
+}
+
+bool StopsAllowed(const double stopDist, const double tpDist, const double spread)
+{
+   double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymPoint();
+   if(stopDist - spread > minDist && tpDist > minDist)
+      return true;
+   g_status = "stop closer than the broker allows";
+   return false;
+}
+
+// Market order with SL/TP at the given distances; retries on requotes. sl/tp receive the prices sent.
+bool SendOrder(const int side, const double lots, const double stopDist, const double tpDist, double entry, double &sl, double &tp, uint &rc)
+{
    bool sent = false;
-   uint rc = 0;
-   for(int attempt = 0; attempt < 3 && !sent; attempt++)
+   for(int attempt = 0; attempt < 3; attempt++)
    {
+      sl = NormPrice(entry - side * stopDist);
+      tp = NormPrice(entry + side * tpDist);
       sent = (side > 0) ? trade.Buy(lots, _Symbol, entry, sl, tp, InpComment)
                         : trade.Sell(lots, _Symbol, entry, sl, tp, InpComment);
       rc = trade.ResultRetcode();
@@ -589,18 +676,135 @@ void TryEntry(const MqlTick &tk, const double equity)
       if(!SymbolInfoTick(_Symbol, fresh))
          break;
       entry = (side > 0) ? fresh.ask : fresh.bid;
-      sl = NormPrice(entry - side * stopDist);
-      tp = NormPrice(entry + side * tpDist);
    }
-   GVSet("slot", slotKey);   // one try per entry hour, filled or not
+   return sent;
+}
+
+//+------------------------------------------------------------------+
+//| 1% a day                                                          |
+//+------------------------------------------------------------------+
+void DailyTick(const MqlTick &tk, const double equity)
+{
+   int open = CountOurPositions();
+   if(g_state == CH_RUNNING && InpMaxDrawdownPct > 0.0 && g_peak > 0.0 && equity <= g_peak * (1.0 - InpMaxDrawdownPct / 100.0))
+   {
+      SetState(CH_DRAWDOWN);
+      Note(StringFormat("Equity %.2f is %.0f%% below the peak %.2f. Closing and stopping for good.", equity, InpMaxDrawdownPct, g_peak));
+   }
+   if(g_state != CH_RUNNING)
+   {
+      CloseOurPositions();
+      return;
+   }
+   if(open == 0 && equity > g_peak)
+   {
+      g_peak = equity;
+      GVSet("peak", g_peak);
+   }
+
+   MqlDateTime t;
+   UtcNow(t);
+   int key = t.year * 10000 + t.mon * 100 + t.day;
+   if(key != g_dayKey)
+   {
+      g_dayKey = key;
+      g_dayStart = (open > 0) ? AccountInfoDouble(ACCOUNT_BALANCE) : equity;
+      GVSet("dKey", key);
+      GVSet("dStart", g_dayStart);
+   }
+
+   if(open > 0)
+   {
+      ManagePosition();
+      if(t.hour >= InpDailyCloseHour || t.day_of_week == 0 || t.day_of_week == 6)
+      {
+         Note(StringFormat("%02d:00 UTC: closing today's trade", InpDailyCloseHour));
+         CloseOurPositions();
+      }
+      g_status = "today's trade is open";
+      return;
+   }
+   if((int)GV("dTraded", 0.0) == key)
+   {
+      double dayPct = (g_dayStart > 0.0) ? (equity / g_dayStart - 1.0) * 100.0 : 0.0;
+      g_status = StringFormat("today is done (%+.2f%%), next trade tomorrow %02d:00 UTC", dayPct, InpDailyEntryHour);
+      return;
+   }
+   if(t.day_of_week == 0 || t.day_of_week == 6)
+   {
+      g_status = "weekend";
+      return;
+   }
+   if(t.hour != InpDailyEntryHour || t.min >= InpEntryWindowMin)
+   {
+      g_status = StringFormat("waiting for %02d:00 UTC", InpDailyEntryHour);
+      return;
+   }
+   DailyTryEntry(tk, key);
+}
+
+void DailyTryEntry(const MqlTick &tk, const int key)
+{
+   string why;
+   int side = TodayDirection(why);
+   if(side == 0)
+   {
+      if(g_status != why)
+         Note(why);
+      g_status = why;
+      GVSet("dTraded", key);
+      return;
+   }
+   double spread = tk.ask - tk.bid;
+   if(spread > InpMaxSpreadUSD)
+   {
+      g_status = StringFormat("waiting: spread %.2f > %.2f", spread, InpMaxSpreadUSD);
+      return;
+   }
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED) || !AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+   {
+      g_status = "algo trading is disabled";
+      return;
+   }
+   double entry = (side > 0) ? tk.ask : tk.bid;
+   double lpl = LossPerLot(side, entry);              // per 1.0 lot at the minimum stop
+   if(lpl <= 0.0)
+   {
+      g_status = "cannot price the stop (symbol data missing)";
+      return;
+   }
+   double perLot = lpl / (g_stop + InpSlippageUSD);
+   double stake = g_dayStart * InpDailyRiskPct / 100.0;
+   double win = g_dayStart * InpDailyTargetPct / 100.0;
+   double lots = FloorVolume(stake / lpl);
+   if(lots <= 0.0)
+   {
+      g_status = StringFormat("balance too small: %.1f%% risk with a $%.0f stop needs about %.0f for 0.01 lot",
+                              InpDailyRiskPct, g_stop, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) * lpl * 100.0 / InpDailyRiskPct);
+      return;
+   }
+   lots = FitMargin(side, lots, entry);
+   if(lots <= 0.0)
+      return;
+   // widen the stop so a loss costs exactly the planned %; the take profit pays exactly the target %
+   double stopDist = MathMax(g_stop, stake / (lots * perLot) - InpSlippageUSD);
+   double tpDist = win / (lots * perLot) + spread;
+   if(!StopsAllowed(stopDist, tpDist, spread))
+      return;
+   double sl = 0.0, tp = 0.0;
+   uint rc = 0;
+   bool sent = SendOrder(side, lots, stopDist, tpDist, entry, sl, tp, rc);
+   if(!sent && (rc == TRADE_RETCODE_REQUOTE || rc == TRADE_RETCODE_PRICE_CHANGED || rc == TRADE_RETCODE_PRICE_OFF))
+      return;                                         // price problem: try again on the next tick of the window
+   GVSet("dTraded", key);
    if(!sent)
    {
       Note(StringFormat("Order failed: %u %s", rc, trade.ResultRetcodeDescription()));
       return;
    }
-   Note(StringFormat("Day %d, %02d:00 UTC, %s: %s %.2f lots @ %.2f | SL %.2f (-%.2f) | TP %.2f (+%.2f)",
-                     DayNumber(), slotHour, why, side > 0 ? "BUY" : "SELL", lots, trade.ResultPrice(), sl,
-                     lots * perLot * (stopDist + InpSlippageUSD), tp, lots * perLot * tpDist));
+   Note(StringFormat("%s: %s %.2f lots @ %.2f | SL %.2f (-%.2f, -%.1f%%) | TP %.2f (+%.2f, +%.1f%%)",
+                     why, side > 0 ? "BUY" : "SELL", lots, trade.ResultPrice(), sl, lots * perLot * (stopDist + InpSlippageUSD),
+                     InpDailyRiskPct, tp, lots * perLot * tpDist, InpDailyTargetPct));
 }
 
 void ManagePosition()
@@ -627,6 +831,22 @@ void ShowPanel(const MqlTick &tk, const double equity)
    if(now == g_lastPanel)
       return;
    g_lastPanel = now;
+   if(InpGoal == GOAL_DAILY)
+   {
+      double dayPct = (g_dayStart > 0.0) ? (equity / g_dayStart - 1.0) * 100.0 : 0.0;
+      string d = "GOLD 1% A DAY  |  " + _Symbol + "\n";
+      d += "State: " + StateName() + "\n";
+      if(g_state == CH_RUNNING)
+         d += "Status: " + g_status + "\n";
+      d += StringFormat("Equity %.2f  |  today %+.2f%% (target +%.1f%%, stop -%.1f%%)  |  peak %.2f, stop-for-good at -%.0f%%\n",
+                        equity, dayPct, InpDailyTargetPct, InpDailyRiskPct, g_peak, InpMaxDrawdownPct);
+      d += StringFormat("Spread %.2f  |  one trade at %02d:00 UTC, closed by %02d:00 UTC\n", tk.ask - tk.bid,
+                        InpDailyEntryHour, InpDailyCloseHour);
+      d += "Last: " + g_last + "\n";
+      d += "Honest odds: ~half the days +1%, the rest -1%. About break-even in uptrends in tests.";
+      Comment(d);
+      return;
+   }
    string s = "GOLD 15-DAY CHALLENGE  |  " + _Symbol + "\n";
    s += "State: " + StateName() + "\n";
    if(g_state == CH_RUNNING)

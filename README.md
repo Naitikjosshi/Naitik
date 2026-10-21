@@ -99,9 +99,53 @@ Reproduce the research: `cd research/xau_scalper && python data.py 2011 2012 201
 
 ---
 
-# Gold15DayChallenge — double the account in 15 days ($10 → $20, $100 → $200, $500 → $1000)
+# Gold15DayChallenge — "1% a day" mode (default) and the 15-day doubling challenge
 
-`MQL5/Experts/Gold15DayChallenge.mq5`. Attach it to XAUUSD with any balance. The target is **starting equity × 2**
+`MQL5/Experts/Gold15DayChallenge.mq5` now has two goals (`InpGoal`):
+- **1% a day (default).** One trade a day at 07:00 UTC in the daily-trend direction. Take profit = **+1%** of the day's
+  starting equity, stop = **−1%**, closed at 20:00 UTC if neither is hit. Then it waits for the next day.
+  It **stops for good** after a **20% drop** from its peak (`InpMaxDrawdownPct`), so a losing streak can't empty the account.
+- **Double**: the 15-day challenge described below (set `InpGoal = Double`).
+
+> ⚠️ **"1% a day" does not mean +1% every day.** About half the days end +1% and the other half −1%. A real 1% every
+> day would be +23% a month and about 12× a year. No strategy without a proven edge can do that.
+
+**What are the chances?** All 1,834 trading days of 2011–2018 gold ticks (`research/xau_scalper/one_pct_day.py`, today's
+prices and spread):
+
+| Risk per day (target +1%) | Days +1% | 1 month, median | 1 year, median | Year in profit | Balance needed for 0.01 lot |
+|---|---|---|---|---|---|
+| **1% (default)** | **53%** | **+0.9%** | **+16.6%** | **87%** | **~$805** |
+| 2% | 67% | −0.2% to +0.9% | +13% to +18% | 67–81% | ~$400–800 |
+| 3% | 74–75% | −1.2% to +0.7% | −3% to +17% | 47–76% | ~$270–535 |
+| 5% | 82–83% | −1.4% to −0.4% | −6% to −2% | 44–47% | ~$160–320 |
+| 10% | 89–90% | −3.1% to −2.1% | −40% to −12% | 21–35% | ~$80–160 |
+
+Risking more makes **more days green**, but the red days are so big that you **lose money over time**. 1% risk is the
+only setting that was positive in both halves of the data (+0.06% a day in 2011–14, +0.10% in 2015–18).
+
+**Read this before using it:** the profit came from **sell days**. On downtrend days it made +0.16% a day (57% of days +1%).
+On **uptrend days, like 2026**, it made **−0.03% a day (48% of days +1%)**, roughly break-even. In 2011–2018 gold
+tended to fall during London/New York hours (see `robustness.py`), which helped sells and hurt buys. While gold keeps rising,
+expect about **break-even**, not +17% a year.
+
+| Key input | Default | Meaning |
+|---|---|---|
+| `InpGoal` | 1% a day | or Double (15-day challenge) |
+| `InpDailyTargetPct` / `InpDailyRiskPct` | 1 / 1 | Take profit and stop as % of the day's starting equity |
+| `InpDailyMinStopUSD` | 8 | Smallest stop in $ per oz (smaller = more spread cost) |
+| `InpDailyEntryHour` / `InpDailyCloseHour` | 7 / 20 | UTC hours of the trade and of the forced close |
+| `InpMaxDrawdownPct` | 20 | Stop for good below this drop from the peak (set `InpResetState = true` once to restart) |
+
+**Small balances:** with $10–$100 the 1% setting **cannot trade**. 1% of $100 is $1, and gold's smallest trade (0.01 lot)
+moves $1 per $1. A $1 stop is far too close for the spread. The panel shows the balance needed (about $805).
+With $100 only `InpDailyRiskPct` of 10% works, and that lost 12–40% a year in the test.
+
+---
+
+# Gold15DayChallenge (InpGoal = Double) — double the account in 15 days ($10 → $20, $100 → $200, $500 → $1000)
+
+`MQL5/Experts/Gold15DayChallenge.mq5` with `InpGoal = Double`. Attach it to XAUUSD with any balance. The target is **starting equity × 2**
 (`InpTargetMultiple`). It trades for at most **15 days**, then **stops for good**: at the target, on day 15, or when the
 money left cannot carry a 0.01-lot stop. Direction follows the daily trend. Entries at 07, 09, 11, 13 UTC, only when no trade is open.
 No martingale, no grid. It never adds lots after a loss.
