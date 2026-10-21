@@ -99,6 +99,57 @@ Reproduce the research: `cd research/xau_scalper && python data.py 2011 2012 201
 
 ---
 
+# AarYaParGold — $10 aar ya paar on XAUUSD
+
+`MQL5/Experts/AarYaParGold.mq5`. **One big trade, then it stops for good.** The stop loss is placed where the loss is
+~90% of the account. The take profit is placed where the win lands exactly on the target (default **$10 → $100**).
+- **PAAR:** the target is hit. It closes everything and stops. Withdraw the profit.
+- **AAR:** the stop is hit. About $1 is left, too little for another trade, so it stops.
+
+> ⚠️ **About 9 out of 10 runs lose the $10.** About 1 in 10 reach $100. This is a lottery-style bet, not income.
+> Only use money you are ready to lose completely.
+
+**How the trade is built** (gold minimum lot 0.01 = 1 oz = $1 per $1 move):
+| Equity | Lots | Stop | Target | Reward:risk |
+|---|---|---|---|---|
+| $10 → $100 | 0.01 | ~$8.90 away (−$9) | ~$90 away (+$90) | ~10 : 1 |
+
+- Direction: the **daily trend** (yesterday's D1 close and EMA20 both above EMA50 = buy; both below = sell; mixed = no trade
+  that day). Entry once a day at **07:00 UTC** (London open, Exness server time = UTC). It keeps trying until 09:00 if the
+  spread is wider than $0.60.
+- It checks margin and the broker's stop-out level, so the broker can't close the trade before our stop does.
+  It needs high leverage (1:1000 or more) for $10. The panel says so if the margin is too high.
+- No martingale, no grid. If you raise `InpRiskPct` (e.g. 50%), it can take a second shot after a loss.
+
+**Why one trade and not many small ones?** If a strategy has no proven edge, the best possible chance of turning $10 into
+$100 is about 10 / 100 = 10%, however you split it up. Every extra trade pays the spread again. Tested on 2011–2018 gold
+tick data (`research/xau_scalper/aar_ya_paar.py`, about 1,830 trials, spread at today's cost):
+
+| How | Chance of 10× |
+|---|---|
+| **1 trade at 10:1, daily trend, 07:00 UTC (default)** | **11.3%** |
+| 1 trade at 10:1, random direction | 9.9% |
+| 2 wins in a row at 3.16:1, daily trend | 7.7% (27.8% × 27.8%) |
+| 3 wins in a row at 1.27:1, daily trend | 12.4% (49.8%³) |
+| 1 trade at 10:1, entry 13:00 UTC | 8.4% |
+
+All of these sit around the 9% that pure chance gives. The trend's small lead may be luck, because gold mostly fell
+in 2011–2018 (always-sell won 12.6%). Most trades are decided within the same day.
+
+| Key input | Default | Meaning |
+|---|---|---|
+| `InpTargetEquity` | 100 | Goal. $10 → $1000 is possible too, but the odds are about 1%. |
+| `InpRiskPct` | 90 | % of equity lost at the stop |
+| `InpMaxRR` | 0 | 0 = one trade straight to the goal; e.g. 1.27 = three steps |
+| `InpDirection` | Daily trend | or always buy / always sell |
+| `InpEntryHourUTC` | 7 | Daily entry time |
+| `InpResetState` | false | Set true once for a new attempt after a new deposit |
+
+Install it like the EA above: copy it to `MQL5/Experts`, compile with F7, attach it to an XAUUSD chart, and turn on Algo Trading.
+Syntax-checked here with `tools/mql_syntax_check` but not compiled in MetaEditor, so fix anything F7 reports.
+
+---
+
 # NaitikGrowthEA (MetaTrader 5 / Exness)
 
 An Expert Advisor for MT5 that tries to grow a small account (default: $100 → $1000 target)
