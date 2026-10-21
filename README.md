@@ -102,39 +102,42 @@ Reproduce the research: `cd research/xau_scalper && python data.py 2011 2012 201
 # Gold15DayChallenge — double the account in 15 days ($10 → $20, $100 → $200, $500 → $1000)
 
 `MQL5/Experts/Gold15DayChallenge.mq5`. Attach it to XAUUSD with any balance. The target is **starting equity × 2**
-(`InpTargetMultiple`). It trades for **15 days**, at most **4 trades a day** (07, 09, 11 and 13 UTC, only when no trade is
-open), then **stops for good**.
-- **Auto settings** by starting balance (the best combination in the tests):
-  - below $50: stop **$3** per oz, take profit **2 × stop**, 0.01 lot
-  - $50 and more: stop **$5** per oz, take profit **1 × stop**, risk **50%** of equity per trade
-- The lot size grows with the money. The direction follows the daily trend.
-- It stops for good at the **target**, after **day 15**, or when the money left cannot carry a 0.01-lot stop.
-- No martingale, no grid. It never adds lots after a loss.
+(`InpTargetMultiple`). It trades for at most **15 days**, then **stops for good**: at the target, on day 15, or when the
+money left cannot carry a 0.01-lot stop. Direction follows the daily trend. Entries at 07, 09, 11, 13 UTC, only when no trade is open.
+No martingale, no grid. It never adds lots after a loss.
 
-> ⚠️ **About 42 out of 100 runs double. The other 58 lose most of the money** (median end: ~$1 from $10, ~$18 from $100,
-> ~$49 from $500). Doubling is a coin flip that slightly favours the house, not income.
+**Two sizing modes** (`InpSizing`):
+- **Max chance (default, "bold play")**: each trade risks only what is still **missing** to reach the target (at most 90%
+  of equity). The take profit lands **exactly on the target**, and the stop is at least $8 away so the spread costs
+  little. Usually 1–2 trades. This is the mathematically best way to reach a target when there is no proven edge
+  (Dubins & Savage): fewer trades means less spread paid.
+- **Active**: up to 4 trades a day. Below $50: $3 stop, 1:2, 0.01 lot. From $50: $5 stop, 1:1, 50% risk.
 
-**Tested odds** (1,820 fifteen-day runs per row on 2011–2018 gold ticks, today's prices and spread,
-`research/xau_scalper/fifteen_days.py`):
+> ⚠️ **About half of all runs double. The other half lose ~90% of the money.** This is a coin flip, not income.
 
-| Start → target | Auto settings | Doubled | Avg trades | Other settings tried |
-|---|---|---|---|---|
-| **$10 → $20** | $3 stop, 1:2, 0.01 lot | **41.8%** | 6.5 | 1:1: 32% · $5 stop: 37% |
-| **$100 → $200** | $5 stop, 1:1, 50% risk | **43.2%** | 12 | $3 stop 1:2 30%: 37% · 10% risk: 6–18% |
-| **$500 → $1000** | $5 stop, 1:1, 50% risk | **42.3%** | 16 | $3 stop 1:2 30%: 37% · 10% risk: 8–23% |
+**Tested odds** (1,820 fifteen-day runs per cell on 2011–2018 gold ticks, today's prices and spread;
+`research/xau_scalper/bold_play.py` and `fifteen_days.py`):
 
-The limit with no proven edge is **50%** for doubling (start ÷ target). The EA gets close because it trades few times and
-pays the spread rarely. Small risk (10%) is safer per trade, but it rarely doubles in 15 days.
+| Start → target | **Max chance (default)** | Active | No-edge limit |
+|---|---|---|---|
+| $10 → $20 | **51.8%** (1 trade) | 41.8% (~6.5 trades) | ~50% |
+| $100 → $200 | **53.8%** (~1.5 trades) | 43.2% (~12 trades) | ~50% |
+| $500 → $1000 | **53.8%** (~1.5 trades) | 42.3% (~16 trades) | ~50% |
 
-For bigger goals the odds fall fast. Set `InpTargetMultiple` and switch off `InpAutoSettings` to use your own stop/RR/risk:
-**5× ≈ 15%** ($3 stop, 1:2, 30%), **10× ≈ 7%** ($3 stop, 1:3, 30%). Lot-size tricks don't beat the limit:
-`research/xau_scalper/size_up.py` gave 8–11% for 10× with pyramiding or one big trade, and **0% with martingale**.
+Read it honestly: from the math alone, Max chance should double about **47–48%** of the time (the spread takes the rest).
+The extra few points came from the daily-trend filter in 2011–2018, a falling gold market, and may not repeat. Other
+Max-chance stop sizes ($3–$12) gave 47–54%. Active mode trades more but pays the spread more often, so it doubles less.
+
+For bigger goals the odds fall fast. Set `InpTargetMultiple` to 5 for about 15%, or 10 for about 7–8%. Lot-size tricks
+don't beat the limit: `research/xau_scalper/size_up.py` gave 8–11% for 10× with pyramiding or one big trade, and
+**0% with martingale**.
 
 | Key input | Default | Meaning |
 |---|---|---|
 | `InpTargetMultiple` | 2 | Target = starting equity × this (`InpTargetEquity` > 0 sets a fixed target instead) |
 | `InpDays` | 15 | Stops for good after this many days |
-| `InpAutoSettings` | true | Uses the tested stop/RR/risk for your balance. `false` = use `InpStopUSD` / `InpRR` / `InpRiskPct` |
+| `InpSizing` | Max chance | or Active (3–4 trades a day) or Manual (`InpStopUSD` / `InpRR` / `InpRiskPct`) |
+| `InpBoldMinStopUSD` / `InpBoldMaxLossPct` | 8 / 90 | Max chance: smallest stop and the largest loss per trade |
 | `InpMaxTradesPerDay` / `InpEntryHours` | 4 / "7,9,11,13" | Trades per day and their UTC hours (Exness server = UTC) |
 | `InpResetState` | false | Set true once to start a new challenge (it saves the new starting balance) |
 

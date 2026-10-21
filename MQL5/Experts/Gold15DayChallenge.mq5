@@ -1,28 +1,33 @@
 //+------------------------------------------------------------------+
 //|                                          Gold15DayChallenge.mq5  |
 //|  15-day XAUUSD challenge: DOUBLE the account ($10 -> $20,        |
-//|  $100 -> $200, $500 -> $1000) with up to 4 trades a day, then    |
-//|  it stops for good.                                              |
+//|  $100 -> $200, $500 -> $1000), then it stops for good.           |
 //|                                                                  |
 //|  Target = starting equity x InpTargetMultiple (default 2).       |
-//|  Auto settings by starting equity (tested best):                 |
-//|    below $50 : stop $3 per oz, target 2 x stop, 0.01 lot         |
-//|    $50 and up: stop $5 per oz, target 1 x stop, risk 50%         |
-//|  Lot size grows with equity. Direction = daily trend. Entries at |
-//|  07, 09, 11, 13 UTC when flat, max 4 a day. Stops for good at    |
-//|  the target, after 15 days, or when a 0.01-lot stop won't fit.   |
+//|  Sizing modes:                                                   |
+//|   MAX CHANCE (default, "bold play"): each trade risks only what  |
+//|     is still missing to the target (max 90% of equity) and its   |
+//|     take profit lands exactly on the target. Usually 1-2 trades. |
+//|   ACTIVE: up to 4 trades a day; below $50 a $3 stop at 1:2 on    |
+//|     0.01 lot, from $50 a $5 stop at 1:1 risking 50%.             |
+//|  Direction = daily trend. Entries at 07, 09, 11, 13 UTC when     |
+//|  flat. Stops for good at the target, after 15 days, or when a    |
+//|  0.01-lot stop no longer fits.                                   |
 //|                                                                  |
-//|  Chosen on 2011-2018 gold ticks (research/xau_scalper/           |
-//|  fifteen_days.py, 1,820 fifteen-day runs each):                  |
-//|    $10 -> $20: 41.8%   $100 -> $200: 43.2%   $500 -> $1000: 42.3%|
-//|  The no-edge limit for doubling is ~50%.                         |
-//|  WARNING: the other ~58% of runs LOSE most of the money.         |
+//|  2011-2018 gold ticks, 1,820 fifteen-day runs each               |
+//|  (research/xau_scalper/bold_play.py, fifteen_days.py):           |
+//|               $10->$20   $100->$200   $500->$1000                |
+//|   MAX CHANCE    51.8%       53.8%        53.8%                   |
+//|   ACTIVE        41.8%       43.2%        42.3%                   |
+//|  Math alone gives ~47-48% for MAX CHANCE; the rest came from the |
+//|  trend filter in this sample and may not repeat.                 |
+//|  WARNING: about half of all runs LOSE ~90% of the money.         |
 //|  No martingale, no grid, no averaging down.                      |
 //+------------------------------------------------------------------+
 #property copyright "Naitik"
-#property version   "1.00"
-#property description "15-day gold challenge: double the account ($10->$20, $100->$200, $500->$1000), up to 4 trades a day."
-#property description "About 42 in 100 runs double; the rest lose most of the money. Stops for good at target, day 15 or bust."
+#property version   "1.10"
+#property description "15-day gold challenge: double the account ($10->$20, $100->$200, $500->$1000)."
+#property description "Max-chance sizing: about half of all runs double, the other half lose ~90%. Stops for good at target, day 15 or bust."
 
 #include <Trade\Trade.mqh>
 
@@ -31,6 +36,13 @@ enum ENUM_CH_DIRECTION
    CH_TREND = 0, // Daily trend (D1 close vs EMA 20/50); skip mixed days
    CH_LONG  = 1, // Always buy
    CH_SHORT = 2  // Always sell
+};
+
+enum ENUM_CH_SIZING
+{
+   SIZING_BOLD   = 0, // Max chance: risk only what is missing to the target (1-2 trades)
+   SIZING_ACTIVE = 1, // Active: up to 4 trades a day, tested stop/RR/risk by balance
+   SIZING_MANUAL = 2  // Manual: InpStopUSD / InpRR / InpRiskPct
 };
 
 enum ENUM_CH_STATE
@@ -48,11 +60,13 @@ input int    InpDays              = 15;    // Stop for good after this many days
 input bool   InpResetState        = false; // Set true once to start a new challenge (then back to false)
 
 input group "Trades"
-input bool   InpAutoSettings      = true;  // Pick stop / RR / risk from the starting equity (tested best)
+input ENUM_CH_SIZING InpSizing   = SIZING_BOLD; // Sizing mode
+input double InpBoldMinStopUSD    = 8.0;   // Max chance: stop at least this far (USD per oz); wider is cheaper in spread
+input double InpBoldMaxLossPct    = 90.0;  // Max chance: never lose more than this % of equity in one trade
 input double InpStopUSD           = 3.0;   // Manual: stop loss distance in USD per oz (0.01 lot loses $3)
 input double InpRR                = 2.0;   // Manual: take profit = stop x this
 input double InpRiskPct           = 30.0;  // Manual: % of equity risked per trade (lot size grows with equity)
-input double InpMinLotMaxRiskPct  = 90.0;  // Use the 0.01 minimum lot while its risk is <= this % of equity
+input double InpMinLotMaxRiskPct  = 90.0;  // Active/Manual: use the 0.01 lot while its risk is <= this % of equity
 input int    InpMaxTradesPerDay   = 4;     // Max entries per UTC day
 input string InpEntryHours        = "7,9,11,13"; // Entry hours, UTC (one try per hour, only when flat)
 input int    InpEntryWindowMin    = 30;    // Minutes after each entry hour to wait for a good spread
@@ -77,7 +91,7 @@ int      g_state = CH_RUNNING;
 datetime g_start = 0;
 double   g_startEq = 0.0;
 double   g_target = 0.0;
-double   g_stop = 0.0;     // settings in use (auto or manual)
+double   g_stop = 0.0;     // settings in use (Max chance: minimum stop)
 double   g_rr = 0.0;
 double   g_risk = 0.0;
 int      g_hours[];
@@ -117,7 +131,8 @@ int OnInit()
 {
    g_tester = (MQLInfoInteger(MQL_TESTER) != 0);
    if(InpStopUSD <= 0.0 || InpRR <= 0.0 || InpRiskPct <= 0.0 || InpRiskPct > 95.0 || InpMinLotMaxRiskPct <= 0.0 ||
-      InpTargetMultiple <= 1.0 || InpTargetEquity < 0.0 ||
+      InpTargetMultiple <= 1.0 || InpTargetEquity < 0.0 || InpBoldMinStopUSD <= 0.0 || InpBoldMaxLossPct <= 0.0 ||
+      InpBoldMaxLossPct > 95.0 ||
       InpMinLotMaxRiskPct > 95.0 || InpDays < 1 || InpMaxTradesPerDay < 1 || InpTrendFast >= InpTrendSlow)
    {
       Print("[G15] Invalid inputs: stop, RR and risk must be > 0, risk <= 95%, days >= 1, fast EMA < slow EMA");
@@ -159,7 +174,13 @@ int OnInit()
       GVSet("startEq", g_startEq);
    }
    g_target = (InpTargetEquity > 0.0) ? InpTargetEquity : g_startEq * InpTargetMultiple;
-   if(InpAutoSettings)
+   if(InpSizing == SIZING_BOLD)
+   {
+      g_stop = InpBoldMinStopUSD;   // per-trade stop and target are sized in TryEntry
+      g_rr   = 0.0;
+      g_risk = InpBoldMaxLossPct;
+   }
+   else if(InpSizing == SIZING_ACTIVE)
    {
       // best combinations in research/xau_scalper/fifteen_days.py (doubling, 15 days)
       g_stop = (g_startEq < 50.0) ? 3.0 : 5.0;
@@ -193,9 +214,9 @@ int OnInit()
       return INIT_FAILED;
    }
    PrintFormat("[G15] %s | start %.2f, equity %.2f -> target %.2f in %d days (day %d now) | %s stop $%.2f, RR %.1f, risk %.0f%% | %s",
-               _Symbol, g_startEq, equity, g_target, InpDays, DayNumber(), InpAutoSettings ? "auto" : "manual",
+               _Symbol, g_startEq, equity, g_target, InpDays, DayNumber(), SizingName(),
                g_stop, g_rr, g_risk, StateName());
-   PrintFormat("[G15] Honest odds: at most ~%.0f%% to reach the target with no proven edge (doubling tested ~42%%)",
+   PrintFormat("[G15] Honest odds: at most ~%.0f%% to reach the target with no proven edge (doubling tested ~50%% max chance, ~42%% active)",
                100.0 * g_startEq / g_target);
    return INIT_SUCCEEDED;
 }
@@ -340,6 +361,13 @@ void SetState(const int state)
    GVSet("state", state);
 }
 
+string SizingName()
+{
+   if(InpSizing == SIZING_BOLD)
+      return "max chance";
+   return (InpSizing == SIZING_ACTIVE) ? "active" : "manual";
+}
+
 string StateName()
 {
    switch(g_state)
@@ -442,7 +470,8 @@ void TryEntry(const MqlTick &tk, const double equity)
 {
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double lplBuy = LossPerLot(1, tk.ask);
-   if(lplBuy > 0.0 && vmin * lplBuy > equity * InpMinLotMaxRiskPct / 100.0)
+   double capPct = (InpSizing == SIZING_BOLD) ? InpBoldMaxLossPct : InpMinLotMaxRiskPct;
+   if(lplBuy > 0.0 && vmin * lplBuy > equity * capPct / 100.0)
    {
       SetState(CH_BUST);
       Note(StringFormat("Equity %.2f cannot carry a %.2f-lot stop of %.2f. Stopped for good.", equity, vmin, vmin * lplBuy));
@@ -505,8 +534,11 @@ void TryEntry(const MqlTick &tk, const double equity)
       g_status = "cannot price the stop (symbol data missing)";
       return;
    }
-   // lot size grows with equity: risk % of equity, at least the minimum lot while it fits the cap
-   double lots = FloorVolume(equity * g_risk / 100.0 / lpl);
+   double perLot = lpl / (g_stop + InpSlippageUSD);       // money per 1.0 price move for 1.0 lot
+   double need = g_target - equity;
+   double boldLoss = MathMin(equity * InpBoldMaxLossPct / 100.0, need);
+   // Max chance: stake what is missing (capped); others: risk % of equity. Lot size grows with equity either way.
+   double lots = FloorVolume((InpSizing == SIZING_BOLD ? boldLoss : equity * g_risk / 100.0) / lpl);
    if(lots <= 0.0)
       lots = FloorVolume(vmin);
    double margin = 0.0;
@@ -524,14 +556,22 @@ void TryEntry(const MqlTick &tk, const double equity)
          lots = fit;
       }
    }
+   double stopDist = g_stop;
+   double tpDist = g_rr * g_stop;
+   if(InpSizing == SIZING_BOLD)
+   {
+      // widen the stop so a loss costs exactly the planned stake; a win lands on the target
+      stopDist = MathMax(g_stop, boldLoss / (lots * perLot) - InpSlippageUSD);
+      tpDist = need / (lots * perLot) + spread;
+   }
    double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymPoint();
-   if(g_stop - spread <= minDist)
+   if(stopDist - spread <= minDist || tpDist <= minDist)
    {
       g_status = "stop closer than the broker allows";
       return;
    }
-   double sl = NormPrice(entry - side * g_stop);
-   double tp = NormPrice(entry + side * g_rr * g_stop);
+   double sl = NormPrice(entry - side * stopDist);
+   double tp = NormPrice(entry + side * tpDist);
 
    bool sent = false;
    uint rc = 0;
@@ -547,8 +587,8 @@ void TryEntry(const MqlTick &tk, const double equity)
       if(!SymbolInfoTick(_Symbol, fresh))
          break;
       entry = (side > 0) ? fresh.ask : fresh.bid;
-      sl = NormPrice(entry - side * g_stop);
-      tp = NormPrice(entry + side * g_rr * g_stop);
+      sl = NormPrice(entry - side * stopDist);
+      tp = NormPrice(entry + side * tpDist);
    }
    GVSet("slot", slotKey);   // one try per entry hour, filled or not
    if(!sent)
@@ -558,7 +598,7 @@ void TryEntry(const MqlTick &tk, const double equity)
    }
    Note(StringFormat("Day %d, %02d:00 UTC, %s: %s %.2f lots @ %.2f | SL %.2f (-%.2f) | TP %.2f (+%.2f)",
                      DayNumber(), slotHour, why, side > 0 ? "BUY" : "SELL", lots, trade.ResultPrice(), sl,
-                     lots * lpl, tp, lots * lpl * g_rr * g_stop / (g_stop + InpSlippageUSD)));
+                     lots * perLot * (stopDist + InpSlippageUSD), tp, lots * perLot * tpDist));
 }
 
 void ManagePosition()
@@ -594,12 +634,17 @@ void ShowPanel(const MqlTick &tk, const double equity)
       day = InpDays;
    s += StringFormat("Day %d of %d  |  start %.2f  equity %.2f -> target %.2f  (x%.2f to go)\n",
                      day, InpDays, g_startEq, equity, g_target, g_target / MathMax(equity, 0.01));
-   s += StringFormat("Spread %.2f  |  %s: stop $%.2f, RR %.1f, risk %.0f%% per trade, max %d trades/day\n",
-                     tk.ask - tk.bid, InpAutoSettings ? "auto" : "manual", g_stop, g_rr, g_risk, InpMaxTradesPerDay);
+   if(InpSizing == SIZING_BOLD)
+      s += StringFormat("Spread %.2f  |  max chance: stake = what is missing (max %.0f%%), stop >= $%.2f\n",
+                        tk.ask - tk.bid, InpBoldMaxLossPct, g_stop);
+   else
+      s += StringFormat("Spread %.2f  |  %s: stop $%.2f, RR %.1f, risk %.0f%% per trade, max %d trades/day\n",
+                        tk.ask - tk.bid, SizingName(), g_stop, g_rr, g_risk, InpMaxTradesPerDay);
    s += "Last: " + g_last + "\n";
    bool doubling = MathAbs(g_target / MathMax(g_startEq, 0.01) - 2.0) < 0.01;
    s += StringFormat("Honest odds: %s (limit %.0f%%). The rest lose most of the money.",
-                     doubling ? "~42% doubled in tests" : "see README", 100.0 * g_startEq / g_target);
+                     !doubling ? "see README" : (InpSizing == SIZING_BOLD ? "~50% doubled in tests" : "~42% doubled in tests"),
+                     100.0 * g_startEq / g_target);
    Comment(s);
 }
 //+------------------------------------------------------------------+
