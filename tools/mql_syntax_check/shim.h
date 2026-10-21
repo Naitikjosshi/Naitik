@@ -142,3 +142,11 @@ enum ENUM_TRADE_TRANSACTION_TYPE { TRADE_TRANSACTION_ORDER_ADD, TRADE_TRANSACTIO
 struct MqlTradeTransaction { ulong deal; ulong order; string symbol; ENUM_TRADE_TRANSACTION_TYPE type; };
 struct MqlTradeRequest { ulong magic; string symbol; double volume; double price; double sl; double tp; };
 struct MqlTradeResult { uint retcode; ulong deal; ulong order; double price; };
+// --- additions for Gold15DayChallenge
+int StringSplit(const string&, unsigned short, Arr<string>&);
+int StringTrimLeft(string&);
+int StringTrimRight(string&);
+long StringToInteger(const string&);
+int StringLen(const string&);
+unsigned short StringGetCharacter(const string&, int);
+datetime StructToTime(MqlDateTime&);
