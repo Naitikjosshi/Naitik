@@ -1,3 +1,104 @@
+# GoldPullbackGrowth — XAUUSD, $100 → $1000 attempt (start here)
+
+`MQL5/Experts/GoldPullbackGrowth.mq5`. Attach it to an **XAUUSD** chart on an Exness MT5 account (signals always use M5).
+It trades one position at a time with a stop loss on every trade. It stops for good at **$1000** (target) or **$40** (floor).
+No martingale, no grid, no averaging down.
+
+> **The honest part first.** No EA can promise $100 → $1000. This one is built to give the **best measured chance**,
+> and the tables below show that chance. It depends on one thing nobody can know in advance: whether the
+> strategy's 2026 edge is real. Run it on a demo account first. The first 50 trades will tell you which case you are in.
+
+## Where the strategy comes from
+I reviewed 8 open-source XAUUSD EAs on GitHub (their READMEs, licenses and how they were tested): FvgGold,
+BAKOME ICT scalper, MT5-Automation-Labs reversion, ronnisnai Gold-Scalping, Zaibten, Sandyyy123, francomascareloai
+and andamagodwin/forex. The strongest was **[andamagodwin/forex](https://github.com/andamagodwin/forex)**: the only one
+that publishes a bid/ask backtest with costs, a train/validation split and its losing cases
+(PF 1.42, 58.9% wins, +25% in 6 months of 2026 on M5). That repository has **no license**, so its code is not copied
+here. `GoldPullbackGrowth.mq5` is a new implementation of its published rules, with the small-account changes below.
+
+**Rules** (long; short is the mirror image), on the closed M5 bar:
+- Trend: close > EMA200 and EMA21 > EMA200
+- Pullback: a low touched EMA21 in the last 5 bars
+- Resume: bar closes above EMA9, is bullish, EMA9 > EMA21
+- Momentum: RSI(14) 45–70 and rising, ADX(14) ≥ 25
+- Quality: bar range ≤ 3 × ATR, spread ≤ $0.45, new trades only 07–17 UTC (Friday until 15 UTC)
+- Exits: stop = max(1.5 × ATR, $1.50), target = 1 × stop, close after 60 bars, at 21:00 UTC and before the broker's daily break
+
+**What is new compared with the original EA**
+| Original | GoldPullbackGrowth |
+|---|---|
+| Fixed 0.5% risk; silently opened the 0.01 minimum lot at **any** risk | Risk modes 1 / 3 / **5%** (default), sized with `OrderCalcProfit` (spread, slippage, commission included). The minimum lot is used only while its real risk is ≤ `InpMinLotMaxRiskPct` (**15%**), otherwise the trade is skipped and the panel shows the equity needed |
+| No goal | Closes everything and stops at **$1000**; stops at the **$40** floor; risk halves while equity is 25% below its peak |
+| Daily loss lock on closed P/L | Daily loss limit on **equity** (25%), max 3 losing trades and 8 entries per day, 5-bar cooldown after a loss, all rebuilt from deal history (restart-safe) |
+| Entry only on the first tick of the bar | Keeps a signal for 60 s in case of a spread spike, one entry per signal bar |
+| — | Margin check, broker stop/freeze levels, tick-size price rounding, requote retries, stale-quote check, closes at once if slippage makes the risk 1.5× the plan, repairs a missing stop (or closes), never widens a stop |
+| — | High-impact USD news pause (MQL5 calendar, live only), chart panel, journal line for every entry, skip and rejection |
+
+## Why the default is 5% risk and a 15% minimum-lot cap
+On a $100 account the risk per trade is set by the **broker's 0.01 lot minimum**, not by the risk setting. 0.01 lot of gold
+= 1 oz, and today's typical stop is about $9, so the smallest possible trade risks ~9% of $100. Below about $180
+every risk mode trades the same 0.01 lot. What decides the outcome is how far it may go above the plan to keep trading
+after a loss. I tested every combination by Monte Carlo (`research/xau_scalper/odds.py`, 20,000 runs of up to 1,300
+trades ≈ 2 years, stops scaled to today's gold):
+
+| If the strategy really has… | 3% risk, 10% cap | **5% risk, 15% cap (default)** | 5% risk, 20% cap |
+|---|---|---|---|
+| the 2026 study's edge (+0.18 R per trade, 59% wins) | 51% reach $1000 | **83% reach $1000** (≈ 260 trades, about 4–5 months) | 88% reach $1000, 8% hit the $40 floor |
+| a smaller edge (+0.06 R, 53% wins) | 14% | **30%** | 36%, but 39% hit the floor |
+| no edge, like 2011–2018 (−0.04 R, 48% wins) | 0% (ends ≈ $83) | **0.2%** (ends ≈ $52) | 0.2%, and 70% hit the floor |
+
+When it runs low, the EA does not blow up. Below ~$60 the minimum lot breaks the 15% cap on most stops, so it stops
+trading and keeps what is left. A pause rule ("stop if the live profit factor is below 1 after 40 trades") was also tested.
+It cut the chance in the good case from 83% to 74% and saved only about $13 in the bad case, so it is not included.
+
+## What 7 years of real data say (read this)
+I tested the exact rules on **Dukascopy tick data, May 2011 – June 2018** (bid/ask every tick, 10-second bars,
+`research/xau_scalper/backtest.py`). This period was never used to design the rules, so it is a clean out-of-sample test:
+
+| M5 rules, 3,600+ trades | Win rate | Avg per trade | Profit factor |
+|---|---|---|---|
+| Zero cost (mid price, no slippage) | 49.2% | −0.01 R | 0.98 |
+| Random entries, same exits, zero cost (baseline) | 50.2% | +0.00 R | 1.01 |
+| Cost like 2026 ($0.20 spread on a $8.83 stop) | 47.8% | −0.04 R | 0.92 |
+| Real 2011–2018 spread ($0.31) | 41.8% | −0.17 R | 0.70 |
+
+Same rules on M15: −0.03 R at zero cost. On H1: +0.07 R at zero cost but −0.03 R with the real spread.
+Only 2013 (+0.07 R) and 2017 (+0.14 R) were positive years on M5.
+
+**So on 2011–2018 the entry signal did no better than random.** The +25% the original author measured comes from
+one 6-month window (gold's 2026 rally). It may continue, or it may have been luck. That is why the odds table has three rows.
+What this test does not cover: 2019–2026 (that data was not reachable here), and Exness's own price feed.
+
+## How to know which case you are in
+Run it on an **Exness demo** (same account type) for 50–100 trades and look at the win rate
+(after 100 trades it is only accurate to about ±5 points, so more trades give a clearer answer):
+- **~57–60%**: you are in the good case. In the model, going live with $100 then has roughly an 80% chance of $1000.
+- **~50–53%**: thin edge. Roughly a 1 in 3 chance.
+- **≤ 48%**: no edge. Do not go live. The EA will slowly shrink $100 to ~$50 and stop.
+
+## Install on Exness MT5
+1. File → Open Data Folder → `MQL5/Experts`. Copy `GoldPullbackGrowth.mq5` there.
+2. MetaEditor (F4) → open it → **Compile (F7)**. It passed a C++ syntax check here (`tools/mql_syntax_check`), but it
+   has not been compiled in MetaEditor, so fix anything F7 reports.
+3. Open an **XAUUSD** chart (any timeframe), drag the EA on, tick **Allow Algo Trading**, press **Algo Trading**.
+4. Inputs: `InpServerUtcOffset = 0` is right for Exness (server time = UTC). Leave everything else on default.
+5. Backtest first: Strategy Tester → GoldPullbackGrowth, XAUUSD, **Every tick based on real ticks**, deposit 100 USD,
+   at least the last 6–12 months. The news filter does not work in the tester.
+
+| Key input | Default | Meaning |
+|---|---|---|
+| `InpTargetEquity` / `InpStopEquity` | 1000 / 40 | Close all and stop for good (set `InpResetState = true` once to re-arm) |
+| `InpRiskMode` | Max growth 5% | Risk per trade (below about $180 the 0.01 minimum lot sets the real risk) |
+| `InpMinLotMaxRiskPct` | 15 | Highest real risk allowed for the 0.01 minimum lot (max 25; 20+ raises the chance of hitting the floor a lot) |
+| `InpMaxDailyLossPct` / `InpMaxLossesPerDay` | 25 / 3 | Daily brakes |
+| `InpMaxSpreadUSD` | 0.45 | Skip entries when ask − bid is wider |
+| `InpSessionStartHour` / `EndHour` | 7 / 17 UTC | New trades only in London/New York hours |
+
+Reproduce the research: `cd research/xau_scalper && python data.py 2011 2012 2013 2014 2015 2016 2017 2018 && python backtest.py && python odds.py`
+(needs `numpy pandas numba`; downloads about 1 GB from [FX-Data/FX-Data-XAUUSD-DS](https://github.com/FX-Data/FX-Data-XAUUSD-DS)).
+
+---
+
 # NaitikGrowthEA (MetaTrader 5 / Exness)
 
 An Expert Advisor for MT5 that tries to grow a small account (default: $100 → $1000 target)

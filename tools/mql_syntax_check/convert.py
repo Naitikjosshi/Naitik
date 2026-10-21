@@ -9,6 +9,7 @@ for i, line in enumerate(lines):
         continue
     line = re.sub(r"^input\s+", "const ", line)
     line = re.sub(r"\b(\w+)\s+(\w+)\[\];", r"Arr<\1> \2;", line)
+    line = re.sub(r"\b(\w+)\s*&\s*(\w+)\[\]", r"Arr<\1> &\2", line)  # array parameters
     m = sig.match(line)
     if m and i + 1 < len(lines) and lines[i + 1].strip() == "{":
         protos.append(line + ";")
