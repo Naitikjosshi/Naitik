@@ -20,7 +20,9 @@
 //|   MAX CHANCE    51.8%       53.8%        53.8%                   |
 //|   ACTIVE        41.8%       43.2%        42.3%                   |
 //|  Math alone gives ~47-48% for MAX CHANCE; the rest came from the |
-//|  trend filter in this sample and may not repeat.                 |
+//|  trend filter in this sample and may not repeat. Runs starting   |
+//|  in an uptrend (like 2026) doubled 45-47%: plan for 45-50%.      |
+//|  (research/xau_scalper/robustness.py)                            |
 //|  WARNING: about half of all runs LOSE ~90% of the money.         |
 //|  No martingale, no grid, no averaging down.                      |
 //+------------------------------------------------------------------+

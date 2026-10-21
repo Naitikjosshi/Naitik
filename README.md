@@ -128,6 +128,16 @@ Read it honestly: from the math alone, Max chance should double about **47–48%
 The extra few points came from the daily-trend filter in 2011–2018, a falling gold market, and may not repeat. Other
 Max-chance stop sizes ($3–$12) gave 47–54%. Active mode trades more but pays the spread more often, so it doubles less.
 
+**Can it be improved further? Tested, and no.** `research/xau_scalper/robustness.py` splits the data into 2011–14 and
+2015–18, so a change has to help in both halves:
+- **Stop size:** $8 was the best in both halves ($5: more spread; $12–24: slower and worse). It's already the default.
+- **Direction:** the daily trend beat a random direction by ~5 points in both halves. But in this data gold fell during
+  London/New York hours and rose in Asian hours: selling at 07:00 UTC doubled 55–56%, buying at 07:00 only 39–42%,
+  buying at 22:00 49–52%. A "sell at 07:00, buy at 22:00" rule gave 52–54% overall, the same as now, and was worse
+  than now in 2015–18 on uptrend days. So it is not a reliable improvement and is not used.
+- **What to expect in 2026:** gold is in an uptrend, so the EA mostly buys. Counting only runs that started in an
+  uptrend, it doubled **45% ($10) and 47% ($100)**, not 52–54%. Plan for about **45–50%**.
+
 For bigger goals the odds fall fast. Set `InpTargetMultiple` to 5 for about 15%, or 10 for about 7–8%. Lot-size tricks
 don't beat the limit: `research/xau_scalper/size_up.py` gave 8–11% for 10× with pyramiding or one big trade, and
 **0% with martingale**.
